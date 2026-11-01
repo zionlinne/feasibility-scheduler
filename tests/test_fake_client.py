@@ -91,8 +91,10 @@ def test_invalid_json_is_a_parse_failure_not_an_exception():
     assert response.outcome is Outcome.INVALID_JSON
     assert response.parsed_body is None
     assert response.raw_body == '{"broken": '
-    assert response.error_type == "invalid_json"
+    assert response.error_type == "invalid_format_no_artifact"
     assert response.retryable is False
+    assert response.format_repair_used is False
+    assert client.repair_prompts == []
     assert client.request_status("idem-1") is RequestStatus.SENT
 
 
@@ -102,7 +104,7 @@ def test_success_body_that_is_not_a_json_object_is_invalid():
 
     assert response.outcome is Outcome.INVALID_JSON
     assert response.parsed_body is None
-    assert response.error_type == "invalid_json"
+    assert response.error_type == "invalid_format_no_artifact"
 
 
 def test_duplicate_response_reuses_request_id_without_new_attempt():

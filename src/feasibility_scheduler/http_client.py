@@ -19,6 +19,16 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import urljoin
 
+from .artifact_delivery import (
+    OUTPUT_TOKEN_HARD_LIMIT,
+    RepairText,
+    is_artifact_request,
+    is_true_output_truncation,
+    owned_files_from_metadata,
+    parse_json_object,
+    persist_raw_body,
+    resolve_model_delivery,
+)
 from .fake_client import (
     ApiRequest,
     ApiResponse,
@@ -31,8 +41,6 @@ DEFAULT_BASE_URL = "https://api.88api.ai/v1"
 DEFAULT_MODEL = "deepseek-v4.1-flash"
 DEFAULT_PROVIDER = "88api"
 DEFAULT_TIMEOUT_SECONDS = 120.0
-# 模型 completion 常见硬上限（2^16）；触顶且 JSON 解失败 → output_truncated
-OUTPUT_TOKEN_HARD_LIMIT = 65536
 _DEFAULT_DPAPI_KEY_FILE = Path(r"D:\airoom-studio\relay-probe\88api\key.dpapi")
 
 
@@ -143,6 +151,7 @@ class HttpClient:
         clock: Callable[[], datetime] | None = None,
         allow_retry_after_unknown: bool = False,
         opener: Callable[..., Any] | None = None,
+        raw_dir: str | Path | None = None,
     ) -> None:
         if not model.strip() or not provider.strip():
             raise RequestValidationError("model/provider 不能为空")
@@ -157,6 +166,9 @@ class HttpClient:
         self._opener = opener or urllib.request.urlopen
         self._api_key = resolve_api_key(api_key, key_file=key_file)
         self._secrets = [self._api_key]
+        self.raw_dir = Path(raw_dir) if raw_dir is not None else None
+        self.received_raw: list[dict[str, Any]] = []
+        self.repair_prompts: list[str] = []
         self._ledger: dict[str, _LedgerEntry] = {}
         self._responses: list[ApiResponse] = []
         self._request_serial = 0
@@ -357,6 +369,8 @@ class HttpClient:
 
         retry_after = self._parse_retry_after(headers)
         scrubbed_raw = _scrub(raw_text, self._secrets)
+        # 原始正文一到达就落盘，先于任何 json.loads。解析失败也保留这份 Raw。
+        self._remember_raw(request, scrubbed_raw, phase="before_parse")
 
         if status_code == 429:
             return ApiResponse(
@@ -426,47 +440,33 @@ class HttpClient:
         try:
             payload = json.loads(raw_text)
         except json.JSONDecodeError:
-            return ApiResponse(
+            return self._delivery_from_text(
+                request=request,
                 request_id=request_id,
-                idempotency_key=request.idempotency_key,
-                task_id=request.task_id,
-                provider=self.provider,
                 model=model,
-                outcome=Outcome.INVALID_JSON,
                 status_code=status_code,
+                text=scrubbed_raw,
                 raw_body=scrubbed_raw,
-                parsed_body=None,
                 usage={},
-                error_type="invalid_json",
-                retry_after_seconds=None,
-                is_duplicate=False,
-                duplicate_of=None,
+                finish_reason=None,
                 attempt=attempt,
                 started_at=started_at,
                 finished_at=finished_at,
-                input_artifact_hash=request.input_artifact_hash or "",
             )
 
         if not isinstance(payload, dict):
-            return ApiResponse(
+            return self._delivery_from_text(
+                request=request,
                 request_id=request_id,
-                idempotency_key=request.idempotency_key,
-                task_id=request.task_id,
-                provider=self.provider,
                 model=model,
-                outcome=Outcome.INVALID_JSON,
                 status_code=status_code,
+                text=scrubbed_raw,
                 raw_body=scrubbed_raw,
-                parsed_body=None,
                 usage={},
-                error_type="invalid_json",
-                retry_after_seconds=None,
-                is_duplicate=False,
-                duplicate_of=None,
+                finish_reason=None,
                 attempt=attempt,
                 started_at=started_at,
                 finished_at=finished_at,
-                input_artifact_hash=request.input_artifact_hash or "",
             )
 
         server_id = payload.get("id")
@@ -475,64 +475,100 @@ class HttpClient:
 
         usage = self._extract_usage(payload)
         content = self._extract_content(payload)
-        parsed_body, parse_failed = self._parse_artifact(content)
+        return self._delivery_from_text(
+            request=request,
+            request_id=request_id,
+            model=model,
+            status_code=status_code,
+            text=content,
+            raw_body=content if content is not None else scrubbed_raw,
+            usage=usage,
+            finish_reason=self._extract_finish_reason(payload),
+            attempt=attempt,
+            started_at=started_at,
+            finished_at=finished_at,
+        )
 
-        if parse_failed:
-            # 仅错误类型标记：截断与普通非法 JSON 共用 INVALID_JSON outcome，
-            # 但 error_type 区分为 output_truncated，便于适配层与审计识别。
-            # ACS 文本抽取：尽量把已闭合文件塞进 parsed_body，供 Artifact Adapter 落盘。
-            truncated = self._looks_truncated(
-                usage=usage,
-                finish_reason=self._extract_finish_reason(payload),
-                content=content,
-            )
-            recovered_body = None
-            if isinstance(content, str) and content:
-                from feasibility_scheduler.adapters.acs_text_extract import extract_delivery_map
-                recovered = extract_delivery_map(content)
-                files = recovered.get("files") or {}
-                if files:
-                    recovered_body = {
-                        "ok": True,
-                        "delivery": "files",
-                        "files": files,
-                        "notes": "acs_text_extract_recovery",
-                        "_extract": recovered,
-                        "_truncated": truncated,
-                    }
-            return ApiResponse(
-                request_id=request_id,
-                idempotency_key=request.idempotency_key,
-                task_id=request.task_id,
-                provider=self.provider,
-                model=model,
-                outcome=Outcome.INVALID_JSON,
-                status_code=status_code,
-                raw_body=content if content is not None else scrubbed_raw,
-                parsed_body=recovered_body,
-                usage=usage,
-                error_type="output_truncated" if truncated else "invalid_json",
-                retry_after_seconds=None,
-                is_duplicate=False,
-                duplicate_of=None,
-                attempt=attempt,
-                started_at=started_at,
-                finished_at=finished_at,
-                input_artifact_hash=request.input_artifact_hash or "",
-            )
+    def _remember_raw(self, request: ApiRequest, body: str, *, phase: str) -> None:
+        persist_raw_body(
+            self.received_raw,
+            raw_dir=self.raw_dir,
+            task_id=request.task_id,
+            idempotency_key=request.idempotency_key,
+            body=body,
+            phase=phase,
+        )
 
+    def _fetch_format_repair(self, request: ApiRequest, prompt: str) -> RepairText | None:
+        """恰好一次格式修复请求。取回正文前先落 Raw；失败则停止，不再请求。"""
+        self.repair_prompts.append(prompt)
+        repair_request = ApiRequest(
+            task_id=request.task_id,
+            idempotency_key=request.idempotency_key + ":format-repair",
+            prompt=prompt,
+            model=request.model,
+            provider=request.provider,
+            input_artifact_hash=request.input_artifact_hash,
+            metadata=dict(request.metadata),
+        )
+        try:
+            status_code, raw_text, _headers = self._post_chat(repair_request)
+        except Exception:
+            return None
+        scrubbed = _scrub(raw_text, self._secrets)
+        self._remember_raw(repair_request, scrubbed, phase="repair_before_parse")
+        if status_code < 200 or status_code >= 300:
+            return None
+        try:
+            payload = json.loads(raw_text)
+        except json.JSONDecodeError:
+            return RepairText(content=scrubbed, usage={}, finish_reason=None)
+        if not isinstance(payload, dict):
+            return RepairText(content=scrubbed, usage={}, finish_reason=None)
+        return RepairText(
+            content=self._extract_content(payload),
+            usage=self._extract_usage(payload),
+            finish_reason=self._extract_finish_reason(payload),
+        )
+
+    def _delivery_from_text(
+        self,
+        *,
+        request: ApiRequest,
+        request_id: str,
+        model: str,
+        status_code: int,
+        text: str | None,
+        raw_body: str | None,
+        usage: Mapping[str, int],
+        finish_reason: str | None,
+        attempt: int,
+        started_at: datetime,
+        finished_at: datetime,
+    ) -> ApiResponse:
+        artifact_mode = is_artifact_request(request.metadata)
+        owned = owned_files_from_metadata(request.metadata) if artifact_mode else ()
+        final = resolve_model_delivery(
+            text,
+            usage=usage,
+            finish_reason=finish_reason,
+            owned_files=owned,
+            artifact_mode=artifact_mode,
+            fetch_repair=lambda prompt: self._fetch_format_repair(request, prompt),
+        )
+        outcome = Outcome.SUCCESS if final.outcome == "success" else Outcome.INVALID_JSON
         return ApiResponse(
             request_id=request_id,
             idempotency_key=request.idempotency_key,
             task_id=request.task_id,
             provider=self.provider,
             model=model,
-            outcome=Outcome.SUCCESS,
+            outcome=outcome,
             status_code=status_code,
-            raw_body=content if content is not None else scrubbed_raw,
-            parsed_body=parsed_body,
-            usage=usage,
-            error_type=None,
+            raw_body=raw_body,
+            parsed_body=final.parsed_body,
+            usage=dict(usage),
+            error_type=final.error_type,
             retry_after_seconds=None,
             is_duplicate=False,
             duplicate_of=None,
@@ -540,6 +576,7 @@ class HttpClient:
             started_at=started_at,
             finished_at=finished_at,
             input_artifact_hash=request.input_artifact_hash or "",
+            format_repair_used=final.format_repair_used,
         )
 
     @staticmethod
@@ -595,20 +632,7 @@ class HttpClient:
         content: str | None,
     ) -> bool:
         """基于现有响应字段判断是否输出触顶/截断（不发新请求）。"""
-        if finish_reason in {"length", "max_tokens", "max_length"}:
-            return True
-        out_tokens = usage.get("output_tokens") if isinstance(usage, Mapping) else None
-        if isinstance(out_tokens, int) and out_tokens >= OUTPUT_TOKEN_HARD_LIMIT:
-            return True
-        if isinstance(content, str) and content:
-            stripped = content.strip()
-            if stripped.startswith("{") and not stripped.endswith("}"):
-                return True
-            if stripped.startswith("[") and not stripped.endswith("]"):
-                return True
-            if stripped.startswith("```") and not stripped.rstrip().endswith("```"):
-                return True
-        return False
+        return is_true_output_truncation(usage if isinstance(usage, Mapping) else None, finish_reason)
 
     @staticmethod
     def _parse_artifact(content: str | None) -> tuple[Mapping[str, Any] | None, bool]:
@@ -616,27 +640,11 @@ class HttpClient:
 
         - 内容本身是 JSON object → 用之
         - 内容缺失但 HTTP 已是 object（无 choices）→ 失败
-        - 非 object JSON / 非法 JSON → invalid_json
-        - 触顶截断（由调用方结合 usage/finish_reason 标 output_truncated）
+        - 非 object JSON / 非法 JSON → 解析失败（具体类别由交付分类决定）
+        - 触顶截断由 usage/finish_reason 标 output_truncated，不靠括号是否闭合
         """
-        if content is None:
-            return None, True
-        text = content.strip()
-        # 容忍 ```json ... ``` 围栏
-        if text.startswith("```"):
-            lines = text.splitlines()
-            if lines and lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            text = "\n".join(lines).strip()
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            return None, True
-        if not isinstance(parsed, dict):
-            return None, True
-        return parsed, False
+        parsed, ok = parse_json_object(content)
+        return parsed, not ok
 
     @staticmethod
     def _parse_retry_after(headers: Mapping[str, str]) -> float | None:
@@ -677,6 +685,7 @@ class HttpClient:
             started_at=first.started_at,
             finished_at=first.finished_at,
             input_artifact_hash=first.input_artifact_hash,
+            format_repair_used=first.format_repair_used,
         )
         self._responses.append(duplicate)
         return duplicate

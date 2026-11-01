@@ -31,8 +31,18 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping
+
+from .artifact_delivery import (
+    RepairText,
+    allows_format_repair,
+    is_artifact_request,
+    owned_files_from_metadata,
+    persist_raw_body,
+    resolve_model_delivery,
+)
 
 FAKE_PROVIDER = "fake"
 DEFAULT_MODEL = "fake-model-1"
@@ -202,6 +212,7 @@ class Step:
     usage: tuple[tuple[str, int], ...] = _DEFAULT_USAGE
     latency_seconds: float | None = None
     duplicate_response: bool = False
+    finish_reason: str | None = None
 
     def __post_init__(self) -> None:
         if self.status_code is not None and not 0 <= self.status_code <= 599:
@@ -242,6 +253,7 @@ class Step:
         usage: Mapping[str, int] | None = None,
         status_code: int = 200,
         latency_seconds: float = 0.25,
+        finish_reason: str | None = None,
     ) -> "Step":
         frozen_usage = tuple(
             sorted((usage if usage is not None else dict(_DEFAULT_USAGE)).items())
@@ -252,6 +264,7 @@ class Step:
             status_code=status_code,
             usage=frozen_usage,
             latency_seconds=latency_seconds,
+            finish_reason=finish_reason,
         )
 
     @classmethod
@@ -295,11 +308,19 @@ class Step:
         )
 
     @classmethod
-    def invalid_json(cls, body: str = '{"broken": ') -> "Step":
+    def invalid_json(
+        cls,
+        body: str = '{"broken": ',
+        *,
+        usage: Mapping[str, int] | None = None,
+        finish_reason: str | None = None,
+    ) -> "Step":
+        frozen_usage = tuple(sorted(usage.items())) if usage is not None else ()
         return cls(
             outcome=Outcome.INVALID_JSON,
             body=body,
-            usage=(),
+            usage=frozen_usage,
+            finish_reason=finish_reason,
         )
 
     @classmethod
@@ -329,6 +350,7 @@ class ApiResponse:
     started_at: datetime
     finished_at: datetime
     input_artifact_hash: str
+    format_repair_used: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "usage", _freeze_usage(self.usage))
@@ -341,12 +363,19 @@ class ApiResponse:
 
     @property
     def retryable(self) -> bool:
-        """超时、限流、5xx 可重试；非法 JSON 视为不可重试的解析失败。"""
+        """超时、限流、5xx 可重试。格式修复不是传输重试，不在这里循环。"""
         return self.outcome in {
             Outcome.TIMEOUT,
             Outcome.RATE_LIMITED,
             Outcome.SERVER_ERROR,
         }
+
+    @property
+    def format_repair_allowed(self) -> bool:
+        """类别允许一次格式修复，且这一次还没用掉。成功响应不再修复。"""
+        if self.format_repair_used or self.ok:
+            return False
+        return allows_format_repair(self.error_type)
 
     def to_audit_dict(self) -> dict[str, Any]:
         """规格 4.1 要求记录的字段；不含 prompt、API key 或原始正文。"""
@@ -372,6 +401,7 @@ class ApiResponse:
             "attempt": self.attempt,
             "is_duplicate": self.is_duplicate,
             "duplicate_of": self.duplicate_of,
+            "format_repair_used": self.format_repair_used,
         }
 
 
@@ -395,6 +425,7 @@ class FakeClient:
         provider: str = FAKE_PROVIDER,
         clock: Callable[[], datetime] | None = None,
         allow_retry_after_unknown: bool = False,
+        raw_dir: str | Path | None = None,
     ) -> None:
         if not model.strip() or not provider.strip():
             raise RequestValidationError("model/provider 不能为空")
@@ -405,6 +436,9 @@ class FakeClient:
         self._cursor = 0
         self._clock = clock
         self._allow_retry_after_unknown = allow_retry_after_unknown
+        self.raw_dir = raw_dir
+        self.received_raw: list[dict[str, Any]] = []
+        self.repair_prompts: list[str] = []
         self._ledger: dict[str, _LedgerEntry] = {}
         self._responses: list[ApiResponse] = []
         self._request_serial = 0
@@ -452,8 +486,9 @@ class FakeClient:
         self._request_serial += 1
         request_id = f"fake-{self._request_serial:06d}"
         started_at, finished_at = self._timestamps(step.effective_latency)
-        parsed_body, parse_failed = self._parse_body(step)
-        outcome = Outcome.INVALID_JSON if parse_failed else step.outcome
+        parsed_body, outcome, error_type, format_repair_used = self._interpret_step(
+            request, step
+        )
 
         entry.attempts += 1
         response = ApiResponse(
@@ -467,7 +502,7 @@ class FakeClient:
             raw_body=step.body,
             parsed_body=parsed_body,
             usage=dict(step.usage),
-            error_type="invalid_json" if parse_failed else step.effective_error_type,
+            error_type=error_type,
             retry_after_seconds=step.retry_after_seconds,
             is_duplicate=False,
             duplicate_of=None,
@@ -475,6 +510,7 @@ class FakeClient:
             started_at=started_at,
             finished_at=finished_at,
             input_artifact_hash=request.input_artifact_hash or "",
+            format_repair_used=format_repair_used,
         )
         entry.status = self._status_for(response)
         entry.last_response = response
@@ -516,6 +552,8 @@ class FakeClient:
         self._cursor = 0
         self._ledger.clear()
         self._responses.clear()
+        self.received_raw.clear()
+        self.repair_prompts.clear()
         self._request_serial = 0
         self._call_index = 0
 
@@ -563,6 +601,7 @@ class FakeClient:
             started_at=first.started_at,
             finished_at=first.finished_at,
             input_artifact_hash=first.input_artifact_hash,
+            format_repair_used=first.format_repair_used,
         )
         self._responses.append(duplicate)
         return duplicate
@@ -574,6 +613,66 @@ class FakeClient:
             started_at = _utc(self._clock())
         self._call_index += 1
         return started_at, started_at + timedelta(seconds=latency_seconds)
+
+    def _interpret_step(
+        self, request: ApiRequest, step: Step
+    ) -> tuple[Mapping[str, Any] | None, Outcome, str | None, bool]:
+        """传输错误保持原样；成功/非法 JSON 走与 HTTP client 相同的交付分类。
+
+        格式修复在同一次 ``call`` 内最多再消费一个脚本步，不增加执行器重试。
+        原始失败正文留在 ``raw_body``，不因修复成功而被覆盖。
+        """
+        if step.outcome not in {Outcome.SUCCESS, Outcome.INVALID_JSON}:
+            return None, step.outcome, step.effective_error_type, False
+
+        artifact_mode = is_artifact_request(request.metadata)
+        owned = owned_files_from_metadata(request.metadata) if artifact_mode else ()
+        if isinstance(step.body, str):
+            persist_raw_body(
+                self.received_raw,
+                raw_dir=self.raw_dir,
+                task_id=request.task_id,
+                idempotency_key=request.idempotency_key,
+                body=step.body,
+                phase="before_parse",
+            )
+
+        def fetch_repair(prompt: str) -> RepairText | None:
+            self.repair_prompts.append(prompt)
+            if self._cursor >= len(self._script):
+                return None
+            nxt = self._script[self._cursor]
+            if nxt.duplicate_response or nxt.outcome not in {
+                Outcome.SUCCESS,
+                Outcome.INVALID_JSON,
+            }:
+                return None
+            self._cursor += 1
+            text = nxt.body if isinstance(nxt.body, str) else ""
+            persist_raw_body(
+                self.received_raw,
+                raw_dir=self.raw_dir,
+                task_id=request.task_id,
+                idempotency_key=request.idempotency_key + ":format-repair",
+                body=text,
+                phase="repair_before_parse",
+            )
+            return RepairText(
+                content=text,
+                usage=dict(nxt.usage),
+                finish_reason=nxt.finish_reason,
+            )
+
+        final = resolve_model_delivery(
+            step.body,
+            usage=dict(step.usage),
+            finish_reason=step.finish_reason,
+            owned_files=owned,
+            artifact_mode=artifact_mode,
+            fetch_repair=fetch_repair,
+        )
+        outcome = Outcome.SUCCESS if final.outcome == "success" else Outcome.INVALID_JSON
+        return final.parsed_body, outcome, final.error_type, final.format_repair_used
 
     @staticmethod
     def _parse_body(step: Step) -> tuple[Mapping[str, Any] | None, bool]:

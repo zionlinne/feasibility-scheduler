@@ -115,7 +115,10 @@ def test_non_json_assistant_content_is_invalid(monkeypatch):
     client = HttpClient(opener=make_opener(openai_success(content="not-json")))
     response = client.call(make_request())
     assert response.outcome is Outcome.INVALID_JSON
+    assert response.error_type == "invalid_format_no_artifact"
     assert response.retryable is False
+    assert response.format_repair_used is False
+    assert client.repair_prompts == []
 
 
 def test_duplicate_does_not_resend(monkeypatch):
@@ -203,4 +206,5 @@ def test_plain_invalid_json_not_marked_truncated(monkeypatch):
     client = HttpClient(opener=make_opener(payload))
     response = client.call(make_request())
     assert response.outcome is Outcome.INVALID_JSON
-    assert response.error_type == "invalid_json"
+    assert response.error_type == "invalid_format_no_artifact"
+    assert response.format_repair_used is False
