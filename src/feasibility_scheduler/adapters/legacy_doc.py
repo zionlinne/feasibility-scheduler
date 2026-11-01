@@ -43,6 +43,7 @@ from feasibility_scheduler.fake_client import (
 from feasibility_scheduler.models import Task
 from feasibility_scheduler.store import TaskStore
 from feasibility_scheduler.adapters.acs_text_extract import extract_delivery_map
+from feasibility_scheduler.adapters.artifact_request import ArtifactMetadataExecutorMixin
 
 
 def _to_plain(value: Any) -> Any:
@@ -166,6 +167,9 @@ class _ArtifactSink:
             record["error"] = "path_escapes_workspace"
             self.delivery[norm] = record
             return record
+        prior = self.delivery.get(norm)
+        if prior is not None and prior.get("status") == "delivered":
+            return dict(prior)
         data = content.encode("utf-8")
         digest = hashlib.sha256(data).hexdigest()
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -217,7 +221,7 @@ class _ArtifactSink:
         }
 
 
-class PromptFromPayloadExecutor(Executor):
+class PromptFromPayloadExecutor(ArtifactMetadataExecutorMixin, Executor):
     """向后兼容扩展：若 payload 含 prompt_text 则用之，否则走内核默认 JSON dump。"""
 
     def _prompt(self, task_id: str) -> str:
@@ -519,6 +523,34 @@ def _looks_output_truncated(response: ApiResponse, body: Mapping[str, Any] | Non
     return False
 
 
+def _write_raw_audit(
+    sink: _ArtifactSink,
+    task: Task,
+    response: ApiResponse,
+    body: Any,
+    extra: Mapping[str, Any] | None = None,
+) -> None:
+    """验收路径上的 Raw 审计。失败返回前也要写，避免只在成功/部分交付时才有 Raw。"""
+    raw_dir = sink.workspace / "_raw_responses"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {
+        "task_id": task.id,
+        "request_id": response.request_id,
+        "outcome": response.outcome.value,
+        "error_type": getattr(response, "error_type", None),
+        "usage": _to_plain(response.usage),
+        "parsed_body": _to_plain(body) if isinstance(body, Mapping) else None,
+        "raw_body": response.raw_body if isinstance(response.raw_body, str) else None,
+        "delivery": sink.delivery_snapshot(),
+    }
+    if extra:
+        payload.update(dict(extra))
+    (raw_dir / f"{task.id}.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
 def legacy_artifact_acceptor(
     *,
     sink: _ArtifactSink,
@@ -533,6 +565,12 @@ def legacy_artifact_acceptor(
         checks: list[str] = ["response_ok"]
         errors: list[str] = []
         validator_errors: list[str] = []
+        _write_raw_audit(
+            sink,
+            task,
+            response,
+            response.parsed_body if isinstance(response.parsed_body, Mapping) else None,
+        )
 
         if response.task_id != task.id:
             errors.append(f"响应 task_id={response.task_id!r} 不匹配")
@@ -568,6 +606,7 @@ def legacy_artifact_acceptor(
                 }
             else:
                 if truncated_hint:
+                    _write_raw_audit(sink, task, response, None)
                     return AcceptanceReport(
                         task.id,
                         False,
@@ -575,7 +614,9 @@ def legacy_artifact_acceptor(
                         (f"OUTPUT_TRUNCATED: error_type={response.error_type!r} "
                          f"outcome={response.outcome.value} usage={dict(response.usage or {})}",),
                     )
-                errors.append("parsed_body 不是对象")
+                label = getattr(response, "error_type", None) or "invalid_json"
+                errors.append(f"parsed_body 不是对象 ({label})")
+                _write_raw_audit(sink, task, response, None)
                 return AcceptanceReport(task.id, False, tuple(checks), tuple(errors))
 
         if body.get("ok") is not True:
@@ -604,24 +645,7 @@ def legacy_artifact_acceptor(
 
         # 截断且捞不到任何完整文件 → 仍标 OUTPUT_TRUNCATED（兼容旧单测与空 body）
         if truncated_hint and not files_map and body.get("ok") is not True:
-            raw_dir = sink.workspace / "_raw_responses"
-            raw_dir.mkdir(parents=True, exist_ok=True)
-            (raw_dir / f"{task.id}.json").write_text(
-                json.dumps(
-                    {
-                        "task_id": task.id,
-                        "request_id": response.request_id,
-                        "outcome": response.outcome.value,
-                        "error_type": getattr(response, "error_type", None),
-                        "usage": _to_plain(response.usage),
-                        "parsed_body": _to_plain(body) if isinstance(body, Mapping) else None,
-                        "delivery": sink.delivery_snapshot(),
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
+            _write_raw_audit(sink, task, response, body)
             return AcceptanceReport(
                 task.id,
                 False,
@@ -684,27 +708,18 @@ def legacy_artifact_acceptor(
                     "error": "incomplete_or_absent_after_extract",
                 }
                 checks.append(f"incomplete:{path}")
-            # 审计 raw + delivery
-            raw_dir = sink.workspace / "_raw_responses"
-            raw_dir.mkdir(parents=True, exist_ok=True)
-            (raw_dir / f"{task.id}.json").write_text(
-                json.dumps(
-                    {
-                        "task_id": task.id,
-                        "request_id": response.request_id,
-                        "outcome": response.outcome.value,
-                        "error_type": getattr(response, "error_type", None),
-                        "usage": _to_plain(response.usage),
-                        "parsed_body": _to_plain(body) if isinstance(body, Mapping) else None,
-                        "raw_body_preview": (response.raw_body or "")[:4000] if isinstance(response.raw_body, str) else None,
-                        "delivery": sink.delivery_snapshot(),
-                        "written": written,
-                        "missing": missing,
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                encoding="utf-8",
+            _write_raw_audit(
+                sink,
+                task,
+                response,
+                body,
+                extra={
+                    "raw_body_preview": (response.raw_body or "")[:4000]
+                    if isinstance(response.raw_body, str)
+                    else None,
+                    "written": written,
+                    "missing": missing,
+                },
             )
             trunc = truncated_hint or _looks_output_truncated(response, body)
             msg_prefix = "OUTPUT_TRUNCATED: " if trunc else ""
@@ -720,24 +735,7 @@ def legacy_artifact_acceptor(
         if errors:
             return AcceptanceReport(task.id, False, tuple(checks), tuple(errors))
 
-        # 额外落盘原始响应，便于审计（不含 key）
-        raw_dir = sink.workspace / "_raw_responses"
-        raw_dir.mkdir(parents=True, exist_ok=True)
-        (raw_dir / f"{task.id}.json").write_text(
-            json.dumps(
-                {
-                    "task_id": task.id,
-                    "request_id": response.request_id,
-                    "outcome": response.outcome.value,
-                    "usage": _to_plain(response.usage),
-                    "parsed_body": _to_plain(body),
-                    "delivery": sink.delivery_snapshot(),
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+        _write_raw_audit(sink, task, response, body)
 
         if mode == "node-check":
             # 只对实际交付的 JS 文件做语法检查；非 JS 跳过。
@@ -825,7 +823,10 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
     if kind in {"", "fake"}:
         client: SchedulerClient = make_placeholder_client(tasks)
     elif kind in {"http", "real"}:
-        kwargs: dict[str, Any] = {"timeout_seconds": cfg.timeout_seconds}
+        kwargs: dict[str, Any] = {
+            "timeout_seconds": cfg.timeout_seconds,
+            "raw_dir": workspace / "_raw_responses",
+        }
         if cfg.model:
             kwargs["model"] = cfg.model
         client = create_client("http", **kwargs)
@@ -891,7 +892,8 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
             "旧题完整 Node 行为验收（33 ops / CLI / HTTP / 持久化）未接入本适配层；"
             f"当前 acceptance={cfg.acceptance}。",
             "模型须返回 JSON；推荐 manifest/file 逐文件交付；批量 files 仍兼容但易触顶。"
-            "触顶截断标 OUTPUT_TRUNCATED；非 JSON 且非截断为 invalid_json。",
+            "触顶截断标 OUTPUT_TRUNCATED；JSON 失败且抽不出文件为 "
+            "invalid_format_no_artifact，只允许一次 ACS fence 格式修复。",
             "node-check 仅对 .js/.mjs/.cjs；非 JS 跳过；验收器错误标 VALIDATOR_ERROR。",
             "未修改可行性内核；prompt / 改图决策均在 adapters 层。",
             "policy=rewrite 启用 C 组风格 keep/split/merge 候选比选与原子改图；"
