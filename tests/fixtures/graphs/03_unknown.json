@@ -1,0 +1,1 @@
+{"tasks":[{"id":"fetch","dependencies":[],"constraints":[{"name":"timeout<=30","value":30}]},{"id":"parse","dependencies":["fetch"]},{"id":"store","dependencies":["parse"],"constraints":[{"name":"files<=3","value":3}]}],"evidence":{"fetch":[{"name":"timeout<=30","verdict":"SATISFIED"}]},"durations":{"fetch":1,"parse":2,"store":1},"deadlines":{"store":10}}

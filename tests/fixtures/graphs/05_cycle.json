@@ -1,0 +1,1 @@
+{"tasks":[{"id":"a","dependencies":["b"]},{"id":"b","dependencies":["a"]}]}

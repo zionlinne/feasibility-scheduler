@@ -1,0 +1,1 @@
+{"tasks":[{"id":"S","dependencies":[]},{"id":"L","dependencies":["S"]},{"id":"R","dependencies":["S"]},{"id":"J","dependencies":["L","R"]}],"durations":{"S":2,"L":3,"R":5,"J":1},"deadlines":{"J":10}}
