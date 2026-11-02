@@ -85,6 +85,24 @@ def validate_plan(plan: Any, tasks: Sequence[Task]) -> None:
          for cid, (parent, _) in children.items()])
 
 
+def bind_source_requirements(plan: Any, task_md: str) -> list[str]:
+    """Bind model references to host-owned source; model source/hash fields are never authoritative."""
+    from .contract_checks import requirement_ledger
+    ledger = requirement_ledger(task_md)
+    if not isinstance(plan, dict) or not isinstance(plan.get("requirements"), list):
+        raise ValueError("planner must return source requirement IDs")
+    rows = plan["requirements"]
+    ids = [row.get("id") if isinstance(row, dict) else None for row in rows]
+    expected = [row["id"] for row in ledger]
+    if (any(not isinstance(rid, str) for rid in ids) or len(ids) != len(set(ids))
+            or set(ids) != set(expected)):
+        raise ValueError("planner source requirement IDs must match the host ledger exactly (no missing, duplicate, or unknown IDs)")
+    replaced = [row["id"] for row in rows if row != next(r for r in ledger if r["id"] == row["id"])
+                and ("source" in row or "source_hash" in row)]
+    plan["requirements"] = ledger
+    return replaced
+
+
 def generate_plan(client: Any, tasks: Sequence[Task], task_md: str, *, audit_dir: Path | None = None) -> dict[str, Any]:
     """Use the configured model once, failing closed on invalid/failed responses."""
     example = {
@@ -98,7 +116,8 @@ def generate_plan(client: Any, tasks: Sequence[Task], task_md: str, *, audit_dir
                         "verification": "who checks composition and how", "counterexample_review": "local passes/global failure cases and mitigations"},
     }
     from .contract_checks import requirement_ledger
-    example["requirements"] = requirement_ledger(task_md)
+    ledger = requirement_ledger(task_md)
+    example["requirements"] = [{"id": row["id"]} for row in ledger]
     example["checks"] = []
     example["decompositions"] = []
     prompt = (
@@ -112,7 +131,9 @@ def generate_plan(client: Any, tasks: Sequence[Task], task_md: str, *, audit_dir
         "additional active tasks. Child execution_dependencies are applied when FBS selects that split. "
         "interface_dependencies may reference module IDs or the provided shared_interfaces contract; "
         "shared_interfaces is a specification reference and must never be an execution dependency. "
-        "Copy requirements unchanged. Every requirement must reference at least one check via checks[].requirements. "
+        "Return requirements as ID-only objects, e.g. {id: R1}; do not copy source text or hashes. "
+        "The host owns and attaches the immutable source ledger below. "
+        "Every requirement must reference at least one check via checks[].requirements. "
         'Every check object MUST have "id" (unique string), "kind" (predicate name), and "requirements" '
         '(source ID list). Use the field name "kind", never "type". Example check object: '
         '{"id":"exact-artifact","kind":"json_equals","path":"artifact.json","key":[],"value":{"x":1},"requirements":["R1"]}. '
@@ -134,7 +155,8 @@ def generate_plan(client: Any, tasks: Sequence[Task], task_md: str, *, audit_dir
         "Interface dependencies can run in parallel using shared agreed representations. "
         "Preserve all root requirements, define composition checks and review cases where all local "
         "checks pass but the root fails. Put blocking questions in unresolved, otherwise use []. Never invent requirements.\n"
-        + canonical(example) + "\nTASK\n" + task_md + "\nMODULES\n"
+        + canonical(example) + "\nHOST SOURCE LEDGER (read-only; reference IDs only)\n" + canonical(ledger)
+        + "\nTASK\n" + task_md + "\nMODULES\n"
         + canonical([{"id": t.id, "owned_files": list(t.payload.get("owned_files", ())),
                       "title": t.payload.get("title"), "outputs": list(t.payload.get("outputs", ()))} for t in tasks])
         + "\nREAD-ONLY PROVIDED MATERIALS (may be checked; never assign ownership or modify)\n"
@@ -163,9 +185,9 @@ def generate_plan(client: Any, tasks: Sequence[Task], task_md: str, *, audit_dir
         if audit_dir is not None:
             audit_dir.mkdir(parents=True, exist_ok=True)
             (audit_dir / "contract-candidate.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+        validation["source_ledger_owner"] = "host"
+        validation["ignored_model_source_fields"] = bind_source_requirements(plan, task_md)
         validate_plan(plan, tasks)
-        if plan.get("requirements") != example["requirements"]:
-            raise ValueError("planner changed the immutable source requirement ledger")
         validation["status"] = "passed"
     except (ValueError, TypeError) as exc:
         validation["error"] = str(exc)

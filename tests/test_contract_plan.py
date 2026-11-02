@@ -140,3 +140,36 @@ def test_rejected_plan_has_actionable_persisted_diagnostics(tmp_path):
     assert json.loads((tmp_path / "contract-validation.json").read_text())["status"] == "failed"
     assert json.loads((tmp_path / "contract-candidate.json").read_text())["checks"][0]["path"] == "not-owned.py"
 
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_planner_source_is_bound_by_host_without_model_transcription(tmp_path, legacy):
+    tasks, plan = fixture()
+    source = 'Compare "offers" with \\ separators'
+    expected = requirement_ledger(source)
+    plan["requirements"] = [{"id": "R1"}]
+    if legacy:
+        plan["requirements"][0].update(source="model rewrote text", source_hash="incorrect")
+    client = FakeClient([Step.success(body=json.dumps(plan))])
+    result = generate_plan(client, tasks, source, audit_dir=tmp_path)
+    assert result["requirements"] == expected
+    assert result["checks"] == plan["checks"]
+    raw = json.loads((tmp_path / "contract-candidate.json").read_text())
+    assert raw["requirements"] == plan["requirements"]
+    audit = json.loads((tmp_path / "contract-validation.json").read_text())
+    assert audit["ignored_model_source_fields"] == (["R1"] if legacy else [])
+
+
+@pytest.mark.parametrize("ids", [[], ["R1", "R1"], ["R2"], [None]])
+def test_host_binding_rejects_missing_duplicate_or_unknown_source_ids(ids):
+    tasks, plan = fixture()
+    plan["requirements"] = [{"id": rid} for rid in ids]
+    with pytest.raises(ValueError, match="IDs must match"):
+        generate_plan(FakeClient([Step.success(body=json.dumps(plan))]), tasks, "Compare offers")
+
+
+def test_host_binding_keeps_requirement_coverage_mandatory():
+    tasks, plan = fixture()
+    plan["requirements"] = [{"id": "R1"}, {"id": "R2"}]
+    with pytest.raises(ValueError, match="uncovered source requirements"):
+        generate_plan(FakeClient([Step.success(body=json.dumps(plan))]), tasks, "Compare offers\nKeep records")
+
