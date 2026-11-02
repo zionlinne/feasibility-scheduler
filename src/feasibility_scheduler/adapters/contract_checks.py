@@ -78,7 +78,7 @@ def validate_checks(plan: dict[str, Any], tasks: Sequence[Task]) -> None:
             if (not isinstance(path, str) or path not in set(owned) | references or "\\" in path
                     or PurePosixPath(path).is_absolute() or ".." in PurePosixPath(path).parts
                     or ":" in path):
-                raise ValueError("check path must be an owned relative artifact")
+                raise ValueError(f"check {check['id']}: {key}={path!r} must be an owned or registered read-only relative artifact")
         if kind == "text_contains" and (not isinstance(check.get("value"), str) or not check["value"]):
             raise ValueError("text checks require a nonempty expected value")
         if kind == "json_equals" and "value" not in check:
@@ -91,6 +91,7 @@ def validate_checks(plan: dict[str, Any], tasks: Sequence[Task]) -> None:
     proposals = plan.get("decompositions", [])
     if not isinstance(proposals, list):
         raise ValueError("decompositions must be a list")
+    all_children = set()
     for proposal in proposals:
         if not isinstance(proposal, dict) or proposal.get("parent") not in {t.id for t in tasks}:
             raise ValueError("invalid decomposition parent")
@@ -100,12 +101,13 @@ def validate_checks(plan: dict[str, Any], tasks: Sequence[Task]) -> None:
         files, ids = [], set()
         for child in children:
             if (not isinstance(child, dict) or not isinstance(child.get("id"), str) or not child["id"]
-                    or child["id"] in ids or child["id"] in {t.id for t in tasks}
+                    or child["id"] in ids or child["id"] in all_children or child["id"] in {t.id for t in tasks}
                     or not isinstance(child.get("postcondition"), str) or not child["postcondition"].strip()
                     or not isinstance(child.get("owned_files"), list) or not child["owned_files"]
                     or any(not isinstance(p, str) for p in child["owned_files"])):
                 raise ValueError("invalid decomposition child")
             ids.add(child["id"])
+            all_children.add(child["id"])
             files.extend(child["owned_files"])
         parent = next(t for t in tasks if t.id == proposal["parent"])
         if len(files) != len(set(files)) or set(files) != set(parent.payload.get("owned_files", ())):

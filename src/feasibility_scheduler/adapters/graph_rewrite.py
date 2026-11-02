@@ -424,7 +424,10 @@ def generate_candidates(
         for proposal in plan.get("decompositions", ()):
             if proposal["parent"] != task.id:
                 continue
+            declarations = {m["id"]: m for m in plan.get("modules", ())}
             children = [_clone_task(task, new_id=child["id"], owned_files=child["owned_files"],
+                                    dependencies=tuple(dict.fromkeys(task.dependencies + tuple(
+                                        declarations.get(child["id"], {}).get("execution_dependencies", ())))),
                                     title=child["postcondition"], estimated_tokens=max(1, _tokens(task) // len(proposal["children"])))
                         for child in proposal["children"]]
             if any(child.id in by_id for child in children):

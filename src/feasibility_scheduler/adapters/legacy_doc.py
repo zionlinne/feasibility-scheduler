@@ -105,6 +105,7 @@ class LegacyDocConfig:
     contract_repair_limit: int = 1
     native_bridge_dir: Path | None = None
     external_checkers: Mapping[str, Any] | None = None
+    acceptance_script: Path | None = None
 
 
 
@@ -825,11 +826,24 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
     if not isinstance(cfg.contract_repair_limit, int) or isinstance(cfg.contract_repair_limit, bool) or cfg.contract_repair_limit < 0:
         raise ValueError("contract_repair_limit must be a nonnegative integer")
     task_input = load_task_input(cfg.task_input_path)
+    task_input["reference_files"] = discover_reference_materials(
+        Path(cfg.task_md_path).parent, task_input.get("reference_files", {})
+    )
+    external_checkers = dict(cfg.external_checkers or {})
+    if cfg.acceptance_script is not None:
+        from .external_verifier import node_verifier
+        external_checkers["task-acceptance"] = node_verifier(cfg.acceptance_script, cfg.workdir)
+    task_input["external_checker_names"] = sorted(
+        set(task_input.get("external_checker_names", [])) | set(external_checkers)
+    )
     task_md = Path(cfg.task_md_path).read_text(encoding="utf-8")
     tasks = build_legacy_tasks(
         task_input, task_md=task_md, module_ids=cfg.module_ids
     )
     run_dir, workspace = _prepare_workdir(cfg)
+    (run_dir / "effective-task-input.json").write_text(
+        json.dumps(task_input, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     sink = _ArtifactSink(workspace)
     references = task_input.get("reference_files", {})
     owned = {p for task in tasks for p in task.payload.get("owned_files", ())}
@@ -862,7 +876,7 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
 
     plan = task_input.get("contract_plan")
     if plan is None and kind in {"http", "real", "native"}:
-        plan = generate_plan(client, tasks, task_md)
+        plan = generate_plan(client, tasks, task_md, audit_dir=run_dir)
     if plan is not None:
         from feasibility_scheduler.adapters.contract_checks import requirement_ledger
         if plan.get("version") != 2:
@@ -884,7 +898,7 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
     if plan is not None:
         from feasibility_scheduler.adapters.contract_runtime import ContractAcceptor
         acceptor = ContractAcceptor(acceptor, sink, run_dir, repairable_files=owned,
-                                    external_checkers=cfg.external_checkers)
+                                    external_checkers=external_checkers)
 
     # 外部门禁：只登记当前启用的适配验收模式（judge_run 要求全部为真）
     external = {
@@ -961,6 +975,29 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     return outcome
+
+
+def discover_reference_materials(materials_dir: Path, supplied: Mapping[str, str]) -> dict[str, str]:
+    """Register the legacy task's supplied metadata/public fixtures, never private or source code."""
+    if not isinstance(supplied, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in supplied.items()):
+        raise ValueError("reference_files must map relative artifact paths to text contents")
+    root = materials_dir.resolve()
+    files = [root / "package.json"]
+    public = root / "public"
+    if public.exists():
+        public.resolve().relative_to(root)
+        files.extend(public.rglob("*"))
+    result = dict(supplied)
+    for source in files:
+        if not source.is_file():
+            continue
+        source.resolve().relative_to(root)
+        relative = source.relative_to(root).as_posix()
+        content = source.read_text(encoding="utf-8")
+        if relative in result and result[relative] != content:
+            raise ValueError(f"reference_files conflicts with supplied material: {relative}")
+        result[relative] = content
+    return result
 
 
 def default_paths() -> dict[str, Path]:

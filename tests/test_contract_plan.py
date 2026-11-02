@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -79,4 +80,63 @@ def test_model_planner_and_real_adapter_entry_offline(tmp_path):
     outcome = run_legacy_doc(LegacyDocConfig(input_path, task_path, tmp_path / "run", policy="fixed"))
     assert outcome.ok
     assert json.loads((tmp_path / "run" / "contract.json").read_text(encoding="utf-8")) == plan
+
+
+def hierarchical_fixture():
+    tasks, plan = fixture()
+    root = replace(tasks[0], id="root", payload={"owned_files": ["a.py", "b.py", "c.py"]})
+    declaration = {**plan["modules"][0], "id": "root"}
+    children = [{"id": "first", "owned_files": ["a.py", "b.py"], "postcondition": "first deliverable"},
+                {"id": "second", "owned_files": ["c.py"], "postcondition": "second deliverable"}]
+    plan["decompositions"] = [{"parent": "root", "children": children}]
+    plan["modules"] = [declaration] + [
+        {**declaration, "id": child["id"], "owned_files": child["owned_files"],
+         "execution_dependencies": ["first"] if child["id"] == "second" else []}
+        for child in children]
+    return [root], plan
+
+
+def test_child_contract_catalog_is_separate_from_active_graph():
+    tasks, plan = hierarchical_fixture()
+    attached = attach_plan(tasks, plan)
+    assert [t.id for t in attached] == ["root"]
+    candidate = next(c for c in generate_candidates(attached, states={}) if c.candidate_id == "contract-split:root")
+    by_id = {t.id: t for t in candidate.tasks}
+    assert by_id["second"].dependencies == ("first",)
+    assert by_id["second"].payload["contract_module_ids"] == ["second"]
+    assert by_id["second"].payload["execution_contract"]["module_contracts"][0]["id"] == "second"
+
+
+@pytest.mark.parametrize("fault", ["undeclared", "ownership", "cycle"])
+def test_invalid_child_contracts_still_rejected(fault):
+    from feasibility_scheduler.adapters.contract_plan import validate_plan
+    tasks, plan = hierarchical_fixture()
+    if fault == "undeclared":
+        plan["modules"].append({**plan["modules"][0], "id": "not-proposed"})
+    elif fault == "ownership":
+        plan["modules"][1]["owned_files"] = ["c.py"]
+    else:
+        plan["modules"][1]["execution_dependencies"] = ["second"]
+    with pytest.raises(ValueError):
+        validate_plan(plan, tasks)
+
+
+def test_shared_interface_reference_is_not_an_execution_edge():
+    tasks, plan = hierarchical_fixture()
+    plan["shared_interfaces"] = {"handler": "handle(state,command,context)"}
+    plan["modules"][1]["interface_dependencies"] = ["shared_interfaces"]
+    assert attach_plan(tasks, plan)[0].dependencies == ()
+    plan["modules"][1]["execution_dependencies"] = ["shared_interfaces"]
+    with pytest.raises(ValueError, match="execution_dependencies"):
+        attach_plan(tasks, plan)
+
+
+def test_rejected_plan_has_actionable_persisted_diagnostics(tmp_path):
+    tasks, plan = fixture()
+    plan["checks"][0]["path"] = "not-owned.py"
+    client = FakeClient([Step.success(body=json.dumps(plan))])
+    with pytest.raises(ValueError, match="not-owned.py"):
+        generate_plan(client, tasks, "Compare offers", audit_dir=tmp_path)
+    assert json.loads((tmp_path / "contract-validation.json").read_text())["status"] == "failed"
+    assert json.loads((tmp_path / "contract-candidate.json").read_text())["checks"][0]["path"] == "not-owned.py"
 

@@ -56,3 +56,29 @@ Trusted integration checks can be registered through
 `paths` defining the repair scope. Model output cannot supply shell commands.
 An unconfigured or broken checker remains UNVERIFIED. The host decides the actual
 verification program and maps its real result to passed/failed/unverified.
+
+## Single-root planning and supplied acceptance
+
+For the legacy material layout, `package.json` and `public/` beside TASK.md are
+automatically registered as read-only references. Private verifier files and
+generated source files are excluded. An explicitly supplied reference cannot
+silently conflict with the on-disk material. The resolved input is recorded in
+`effective-task-input.json`.
+
+`modules` is a contract catalog. It contains every initial task plus optional
+child contracts explicitly named in `decompositions`. Children remain inactive
+until FBS selects the split. Their declared execution dependencies and handoffs
+then enter the new execution contracts. Ownership must partition the parent
+exactly; unknown children, overlapping ownership, cycles and invalid references
+remain errors. `shared_interfaces` may be an interface-specification reference,
+and never creates an execution wait.
+
+Use `--acceptance-script /absolute/private/verify-v3.mjs` to register the trusted
+Node verifier as `task-acceptance`. The script is called with the absolute
+solution directory and a fresh JSON report path. New plans can reference this
+checker using `kind: external`. Existing manual obligations remain UNVERIFIED;
+passing preflight or syntax checks does not imply business acceptance.
+
+Planner validation writes `contract-candidate.json` and
+`contract-validation.json`, including failed candidates. It does not silently
+retry paid model calls or discard constraints to force a plan through validation.

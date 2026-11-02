@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
+from pathlib import Path
 from typing import Any, Sequence
 
 from feasibility_scheduler.dag import build_dag
@@ -32,32 +33,59 @@ def validate_plan(plan: Any, tasks: Sequence[Task]) -> None:
     require_text(plan.get("composition"), ("method", "consistency", "verification", "counterexample_review"))
     modules = plan.get("modules")
     ids = {task.id for task in tasks}
-    if not isinstance(modules, list) or len(modules) != len(ids):
+    if not isinstance(modules, list):
         raise ValueError("contract plan must cover every selected task exactly once")
+    children = {}
+    if plan["version"] == 2:
+        from .contract_checks import validate_checks
+        validate_checks(plan, tasks)
+        children = {child["id"]: (proposal["parent"], child)
+                    for proposal in plan.get("decompositions", []) for child in proposal["children"]}
+    allowed_ids = ids | children.keys()
+    interface_ids = set(allowed_ids)
+    if isinstance(plan.get("shared_interfaces"), dict) and plan["shared_interfaces"]:
+        interface_ids.add("shared_interfaces")
     seen = set()
     for module in modules:
         require_text(module, ("id", "precondition", "postcondition", "verification", "handoff"))
         mid = module["id"]
-        if mid not in ids or mid in seen:
+        if mid not in allowed_ids or mid in seen:
             raise ValueError(f"unknown or duplicate contract module: {mid}")
         seen.add(mid)
         for key in ("execution_dependencies", "interface_dependencies"):
             deps = module.get(key)
-            if (not isinstance(deps, list) or any(not isinstance(d, str) or d not in ids or d == mid for d in deps)
+            targets = interface_ids if key == "interface_dependencies" else allowed_ids
+            if (not isinstance(deps, list) or any(not isinstance(d, str) or d not in targets or d == mid for d in deps)
                     or len(set(deps)) != len(deps)):
                 raise ValueError(f"invalid {key} for {mid}")
+        if mid in ids and not set(module["execution_dependencies"]) <= ids:
+            raise ValueError(f"active module {mid} cannot wait for an inactive proposed child")
+        if mid in children:
+            parent, proposal = children[mid]
+            if parent in module["execution_dependencies"]:
+                raise ValueError(f"child {mid} cannot wait for its replaced parent {parent}")
+            if "owned_files" in module:
+                owned = module["owned_files"]
+                if (not isinstance(owned, list) or any(not isinstance(p, str) for p in owned)
+                        or len(owned) != len(proposal["owned_files"])
+                        or set(owned) != set(proposal["owned_files"])):
+                    raise ValueError(f"child contract ownership differs from decomposition: {mid}")
+    if not ids <= seen:
+        raise ValueError(f"contract plan missing selected tasks: {sorted(ids - seen)}")
     # Existing required waits remain required. Interface references never add waits.
     by_id = {m["id"]: m for m in modules}
+    parent_tasks = {t.id: t for t in tasks}
+    # Child declarations describe future work, not extra active tasks. Validate
+    # their reference graph now; actual ownership/dependency rewrites remain gated.
     build_dag([
         replace(t, dependencies=tuple(sorted(set(t.dependencies) | set(by_id[t.id]["execution_dependencies"]))))
         for t in tasks
-    ])
-    if plan["version"] == 2:
-        from .contract_checks import validate_checks
-        validate_checks(plan, tasks)
+    ] + [Task(id=cid, dependencies=tuple(by_id[cid]["execution_dependencies"])
+              if cid in by_id else parent_tasks[parent].dependencies)
+         for cid, (parent, _) in children.items()])
 
 
-def generate_plan(client: Any, tasks: Sequence[Task], task_md: str) -> dict[str, Any]:
+def generate_plan(client: Any, tasks: Sequence[Task], task_md: str, *, audit_dir: Path | None = None) -> dict[str, Any]:
     """Use the configured model once, failing closed on invalid/failed responses."""
     example = {
         "version": 2,
@@ -79,6 +107,11 @@ def generate_plan(client: Any, tasks: Sequence[Task], task_md: str) -> dict[str,
         "Keep initial module IDs. You may propose decompositions as [{parent: module_id, children: "
         "[{id: unique_id, owned_files: [artifact_path], postcondition: concrete_deliverable}]}], "
         "partitioning the parent's artifacts exactly, including non-code artifacts. "
+        "modules must contain each initial task contract exactly once. It may ALSO contain detailed "
+        "contracts for children explicitly declared in decompositions; these are future contracts, not "
+        "additional active tasks. Child execution_dependencies are applied when FBS selects that split. "
+        "interface_dependencies may reference module IDs or the provided shared_interfaces contract; "
+        "shared_interfaces is a specification reference and must never be an execution dependency. "
         "Copy requirements unchanged. Every requirement must reference at least one check via checks[].requirements. "
         'Every check object MUST have "id" (unique string), "kind" (predicate name), and "requirements" '
         '(source ID list). Use the field name "kind", never "type". Example check object: '
@@ -122,10 +155,25 @@ def generate_plan(client: Any, tasks: Sequence[Task], task_md: str) -> dict[str,
     ))
     if response.outcome != Outcome.SUCCESS:
         raise ValueError(f"contract planning failed: {response.outcome}")
-    plan = json.loads(response.raw_body)
-    validate_plan(plan, tasks)
-    if plan.get("requirements") != example["requirements"]:
-        raise ValueError("planner changed the immutable source requirement ledger")
+    validation = {"selected_task_ids": [t.id for t in tasks],
+                  "registered_reference_paths": sorted(tasks[0].payload.get("reference_files", {})) if tasks else [],
+                  "status": "failed"}
+    try:
+        plan = json.loads(response.raw_body)
+        if audit_dir is not None:
+            audit_dir.mkdir(parents=True, exist_ok=True)
+            (audit_dir / "contract-candidate.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+        validate_plan(plan, tasks)
+        if plan.get("requirements") != example["requirements"]:
+            raise ValueError("planner changed the immutable source requirement ledger")
+        validation["status"] = "passed"
+    except (ValueError, TypeError) as exc:
+        validation["error"] = str(exc)
+        raise
+    finally:
+        if audit_dir is not None:
+            audit_dir.mkdir(parents=True, exist_ok=True)
+            (audit_dir / "contract-validation.json").write_text(json.dumps(validation, ensure_ascii=False, indent=2), encoding="utf-8")
     return plan
 
 
@@ -164,6 +212,11 @@ def refresh_contract(task: Task) -> Task:
             "requirements": sorted({r for check in plan["checks"] if check["id"] in local + deferred
                                     for r in check["requirements"]}),
             "root_contract_hash": payload["contract_hash"]}
+    declarations = {m["id"]: m for m in plan["modules"]}
+    if task.id in declarations:
+        payload["contract_module_ids"] = [task.id]
+    unit["module_contracts"] = [declarations[mid] for mid in payload.get("contract_module_ids", [])
+                                if mid in declarations]
     payload["execution_contract"] = unit
     payload["execution_contract_hash"] = "sha256:" + hashlib.sha256(canonical(unit).encode()).hexdigest()
     # Replace the previous projection, retaining the immutable shared contract.

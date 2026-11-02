@@ -227,3 +227,22 @@ def test_external_checker_requires_trusted_registration(tmp_path):
     result = evaluate_checks(plan, tmp_path, ids={"suite"}, external_checkers={
         "registered-suite": lambda path: calls.append(path) or {"status": "failed", "detail": "real verifier found mismatch"}})[0]
     assert calls == [tmp_path] and result["status"] == "failed"
+
+
+def test_host_acceptance_script_runs_as_root_gate(tmp_path):
+    _, plan, data, cfg = setup_task(tmp_path)
+    # File-only fixture isolates host registration from model/network behavior.
+    plan["checks"] = [c for c in plan["checks"] if c["kind"] == "file_exists"]
+    plan["checks"].append({"id": "trusted-root", "kind": "external", "name": "task-acceptance",
+                           "paths": ["a.json", "b.json"], "requirements": ["R1"]})
+    cfg.task_input_path.write_text(json.dumps(data), encoding="utf-8")
+    script = tmp_path / "verify.mjs"
+    script.write_text("""import fs from 'node:fs';
+const [solution,report]=process.argv.slice(2);
+fs.writeFileSync(report,JSON.stringify({solution,summary:{passed:1,failed:0,error:0},cases:[]}));
+""")
+    outcome = run_legacy_doc(replace(cfg, client_kind="fake", acceptance_script=script))
+    assert outcome.ok and outcome.reports["__contract_composition__"].passed
+    assert (cfg.workdir / "official-acceptance-1.json").is_file()
+    effective = json.loads((cfg.workdir / "effective-task-input.json").read_text())
+    assert "task-acceptance" in effective["external_checker_names"]
