@@ -174,7 +174,8 @@ def _validate_or_none(tasks: Sequence[Task]) -> tuple[Task, ...] | None:
             if key in seen:
                 return None
             seen.add(key)
-    return tuple(tasks)
+    from .contract_plan import refresh_contract
+    return tuple(refresh_contract(task) for task in tasks)
 
 
 def _cover_files(tasks: Sequence[Task]) -> set[str]:
@@ -206,6 +207,8 @@ def _merge_pair(
     """合并两个未领取、文件不交叠的真实模块。"""
     owned_l = _owned(left)
     owned_r = _owned(right)
+    if left.payload.get("contract_hash") != right.payload.get("contract_hash"):
+        return None
     if not owned_l or not owned_r:
         return None
     set_l = {p.replace("\\", "/") for p in owned_l}
@@ -243,6 +246,10 @@ def _merge_pair(
     # prompt 由调用方在 apply 后统一重写；此处先占位保留 left 的 prompt 结构标记
     payload = dict(merged.payload)
     payload["merged_from"] = [left.id, right.id]
+    if payload.get("contract_hash"):
+        payload["contract_module_ids"] = sorted(set(
+            left.payload["contract_module_ids"] + right.payload["contract_module_ids"]
+        ))
     payload["prompt_text"] = (
         f"[REWRITE-MERGE] Implement modules {left.id} + {right.id} together.\n"
         f"owned_files={merged_owned}\n"
@@ -412,6 +419,28 @@ def generate_candidates(
     mutable_tasks = [by_id[i] for i in sorted(mutable) if i in by_id]
 
     serial = 0
+    for task in mutable_tasks:
+        plan = task.payload.get("contract_plan", {})
+        for proposal in plan.get("decompositions", ()):
+            if proposal["parent"] != task.id:
+                continue
+            declarations = {m["id"]: m for m in plan.get("modules", ())}
+            children = [_clone_task(task, new_id=child["id"], owned_files=child["owned_files"],
+                                    dependencies=tuple(dict.fromkeys(task.dependencies + tuple(
+                                        declarations.get(child["id"], {}).get("execution_dependencies", ())))),
+                                    title=child["postcondition"], estimated_tokens=max(1, _tokens(task) // len(proposal["children"])))
+                        for child in proposal["children"]]
+            if any(child.id in by_id for child in children):
+                continue
+            rebuilt = _retarget_deps([t for t in task_list if t.id != task.id] + children,
+                                     mapping={task.id: tuple(c.id for c in children)})
+            after = _validate_or_none(rebuilt)
+            if after is not None and _cover_files(after) == _cover_files(task_list):
+                candidates.append(RewriteCandidate(
+                    candidate_id=f"contract-split:{task.id}", kind="split",
+                    reason="按契约提议的交付物边界拆分并重新投影检查责任", score=float(len(children)),
+                    tasks=after, removed_ids=(task.id,), added_ids=tuple(c.id for c in children),
+                    details={"source": "contract_plan"}))
     # merge：轻量 + 文件不交叠
     for i, left in enumerate(mutable_tasks):
         for right in mutable_tasks[i + 1 :]:
