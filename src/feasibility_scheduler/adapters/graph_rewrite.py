@@ -206,6 +206,8 @@ def _merge_pair(
     """合并两个未领取、文件不交叠的真实模块。"""
     owned_l = _owned(left)
     owned_r = _owned(right)
+    if left.payload.get("contract_hash") != right.payload.get("contract_hash"):
+        return None
     if not owned_l or not owned_r:
         return None
     set_l = {p.replace("\\", "/") for p in owned_l}
@@ -243,6 +245,10 @@ def _merge_pair(
     # prompt 由调用方在 apply 后统一重写；此处先占位保留 left 的 prompt 结构标记
     payload = dict(merged.payload)
     payload["merged_from"] = [left.id, right.id]
+    if payload.get("contract_hash"):
+        payload["contract_module_ids"] = sorted(set(
+            left.payload["contract_module_ids"] + right.payload["contract_module_ids"]
+        ))
     payload["prompt_text"] = (
         f"[REWRITE-MERGE] Implement modules {left.id} + {right.id} together.\n"
         f"owned_files={merged_owned}\n"

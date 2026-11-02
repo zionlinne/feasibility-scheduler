@@ -833,6 +833,20 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
     else:
         raise ValueError(f"未知 client: {cfg.client_kind!r}")
 
+    # Plan before dispatch; supplied plans also support reproducible offline runs.
+    from feasibility_scheduler.adapters.contract_plan import attach_plan, generate_plan
+
+    plan = task_input.get("contract_plan")
+    if plan is None and kind in {"http", "real"}:
+        plan = generate_plan(client, tasks, task_md)
+    if plan is not None:
+        tasks = attach_plan(tasks, plan)
+        (run_dir / "contract.json").write_text(
+            json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        if isinstance(client, _PlaceholderClient):
+            client = make_placeholder_client(tasks)
+
     store = TaskStore(run_dir / "state.sqlite3")
     log = EventLog(run_dir / "events.jsonl", run_id=run_dir.name)
     acceptor = legacy_artifact_acceptor(sink=sink, mode=cfg.acceptance)
