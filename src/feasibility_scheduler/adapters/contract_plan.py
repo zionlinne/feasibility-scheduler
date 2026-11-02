@@ -88,7 +88,12 @@ def validate_plan(plan: Any, tasks: Sequence[Task]) -> None:
         expected = task.payload.get("acceptance_profile")
         if expected is not None and plan.get("acceptance_profile") != expected:
             raise ValueError("contract differs from the host acceptance profile")
+        expected_standard = task.payload.get("planning_standard")
+        if expected_standard is not None and plan.get("planning_standard") != expected_standard:
+            raise ValueError("contract differs from the host planning standard")
     validate_responsibilities(plan, tasks)
+    from .modular_standard import validate_modular_standard
+    validate_modular_standard(plan, tasks)
 
 
 def bind_source_requirements(plan: Any, task_md: str) -> list[str]:
@@ -127,6 +132,33 @@ def generate_plan(client: Any, tasks: Sequence[Task], task_md: str, *, audit_dir
     example["checks"] = []
     example["decompositions"] = []
     profile = tasks[0].payload.get("acceptance_profile") if tasks else None
+    standard = tasks[0].payload.get("planning_standard") if tasks else None
+    standard_prompt = ""
+    if standard is not None:
+        from .modular_standard import STANDARD
+        if standard != STANDARD:
+            raise ValueError("unknown planning_standard")
+        standard_prompt = (
+            '\nHOST PLANNING STANDARD: modular-v1. Propose cohesive functional responsibilities, '
+            'not a fixed module count or one file per task. Keeping the task whole is valid. '
+            'A shared transaction/state invariant should have a clear implementation owner; other modules '
+            'use its interface instead of independently implementing competing state/commit rules. '
+            'Every active AND proposed child module must have a full modules[] declaration, including '
+            'owned_files (exactly its assigned artifacts), boundary (why this responsibility belongs together), '
+            'invariants (explicit string array, possibly empty), local_checks (nonempty existing check IDs), '
+            'and estimated_tokens (positive output-work estimate for THIS module; never divide a parent estimate '
+            'by file count). Local checks must be executable with its own outputs and provided materials; '
+            'manual and whole-workspace external suites do not count as local evidence. '
+            'When only file_exists/text_contains can be checked locally, explicitly declare acceptance_limitations '
+            'describing the missing behavioral evidence and root check responsible for it. Do not claim structural '
+            'checks prove functionality. Preserve independent root business acceptance. '
+            'Modules are atomic functional units: automatic per-file splitting is disabled. A decomposition must '
+            'explicitly describe complete child contracts, interfaces, ownership and local checks. '
+            'Optional cohesion_group permits automatic merging only among modules explicitly given the same group; '
+            'omit it to keep independent responsibilities separate. All execution waits must match real artifacts; '
+            'interface-only agreement preserves parallelism. Prefer small incremental cross-module checks where '
+            'both sides are available through declared execution dependencies.\n'
+        )
     profile_prompt = ""
     if profile is not None:
         example["acceptance_assignments"] = []
@@ -179,7 +211,7 @@ def generate_plan(client: Any, tasks: Sequence[Task], task_md: str, *, audit_dir
         "Interface dependencies can run in parallel using shared agreed representations. "
         "Preserve all root requirements, define composition checks and review cases where all local "
         "checks pass but the root fails. Put blocking questions in unresolved, otherwise use []. Never invent requirements.\n"
-        + profile_prompt + canonical(example) + "\nHOST SOURCE LEDGER (read-only; reference IDs only)\n" + canonical(ledger)
+        + profile_prompt + standard_prompt + canonical(example) + "\nHOST SOURCE LEDGER (read-only; reference IDs only)\n" + canonical(ledger)
         + "\nTASK\n" + task_md + "\nMODULES\n"
         + canonical([{"id": t.id, "owned_files": list(t.payload.get("owned_files", ())),
                       "title": t.payload.get("title"), "outputs": list(t.payload.get("outputs", ()))} for t in tasks])
@@ -215,6 +247,11 @@ def generate_plan(client: Any, tasks: Sequence[Task], task_md: str, *, audit_dir
             (audit_dir / "contract-candidate.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
         validation["source_ledger_owner"] = "host"
         validation["ignored_model_source_fields"] = bind_source_requirements(plan, task_md)
+        if standard is not None:
+            if plan.get("planning_standard", standard) != standard:
+                raise ValueError("contract differs from the host planning standard")
+            plan["planning_standard"] = standard
+            validation["planning_standard"] = standard
         if profile is not None:
             from .acceptance_profile import bind_profile, complete_root_references
             bind_profile(plan, profile)
@@ -235,14 +272,39 @@ def attach_plan(tasks: Sequence[Task], plan: dict[str, Any]) -> list[Task]:
     validate_plan(plan, tasks)
     digest = "sha256:" + hashlib.sha256(canonical(plan).encode()).hexdigest()
     by_id = {m["id"]: m for m in plan["modules"]}
+    from .modular_standard import ownership_catalog
+    ownership = ownership_catalog(tasks, plan)
+    sources = {t.id: t.payload.get("task_source", str(t.payload.get("prompt_text", ""))) for t in tasks}
+    sources.update({c["id"]: sources[p["parent"]] for p in plan.get("decompositions", ()) for c in p["children"]})
     attached = []
     for task in tasks:
         deps = tuple(sorted(set(task.dependencies) | set(by_id[task.id]["execution_dependencies"])))
         payload = dict(task.payload)
-        payload.update(contract_plan=plan, contract_hash=digest, contract_module_ids=[task.id], deps=list(deps))
-        payload["prompt_text"] = str(payload.get("prompt_text", "")) + "\nSHARED CONTRACT " + digest + "\n" + canonical(plan)
-        attached.append(refresh_contract(replace(task, dependencies=deps, payload=payload)))
-    return attached
+        payload.update(contract_plan=plan, contract_hash=digest, contract_module_ids=[task.id], deps=list(deps),
+                       module_ownership=ownership, task_source=payload.get("task_source", str(payload.get("prompt_text", ""))))
+        payload["module_sources"] = sources
+        attached.append(replace(task, dependencies=deps, payload=payload))
+    return refresh_contracts(attached)
+
+
+def refresh_contracts(tasks: Sequence[Task]) -> list[Task]:
+    """Recompute only declared dependency context; peer existence never adds a wait."""
+    by_id = {t.id: t for t in tasks}
+
+    def dependency_paths(task, seen):
+        paths = set()
+        for dep in task.dependencies:
+            if dep in seen or dep not in by_id:
+                continue
+            seen.add(dep)
+            parent = by_id[dep]
+            paths.update(parent.payload.get("owned_files", ()))
+            paths.update(dependency_paths(parent, seen))
+        return paths
+
+    return [refresh_contract(replace(t, payload={**t.payload, "dependency_read_paths": sorted(dependency_paths(t, set()))}))
+            if t.payload.get("contract_plan", {}).get("version") == 2
+            and not t.payload.get("contract_composition") and not t.payload.get("contract_integration") else t for t in tasks]
 
 
 def refresh_contract(task: Task) -> Task:
@@ -269,15 +331,43 @@ def refresh_contract(task: Task) -> Task:
                                     for r in check["requirements"]}),
             "root_contract_hash": payload["contract_hash"]}
     declarations = {m["id"]: m for m in plan["modules"]}
-    if task.id in declarations:
+    ownership = payload.get("module_ownership", {})
+    if task.id in declarations and (not ownership or set(ownership.get(task.id, ())) == owned):
         payload["contract_module_ids"] = [task.id]
+    elif ownership:
+        payload["contract_module_ids"] = [mid for mid in payload.get("contract_module_ids", ())
+                                          if owned.intersection(ownership.get(mid, ()))]
+    sources = payload.get("module_sources", {})
+    if sources:
+        payload["task_source"] = "\n\n".join(dict.fromkeys(sources[mid] for mid in payload["contract_module_ids"] if mid in sources))
     unit["module_contracts"] = [declarations[mid] for mid in payload.get("contract_module_ids", [])
                                 if mid in declarations]
+    unit["module_contracts"] = [{**m, "owned_files": sorted(owned.intersection(ownership.get(m["id"], owned)))}
+                                for m in unit["module_contracts"]]
+    upstream = set(payload.get("dependency_read_paths", ()))
+    references = set(payload.get("reference_files", {}))
+    root_only = {cid for a in plan.get("acceptance_assignments", ()) if a["scope"] == "root" for cid in a["checks"]}
+    unit["integration_checks"] = [c["id"] for c in plan["checks"] if c["id"] in deferred
+                                  and c["id"] not in root_only and c["kind"] not in {"external", "manual"}
+                                  and check_paths(c).intersection(upstream)
+                                  and check_paths(c) <= owned | upstream | references]
+    unit["local_evidence"] = "structural-only" if all(
+        c["kind"] in {"file_exists", "text_contains"} for c in plan["checks"] if c["id"] in local
+    ) else "artifact-predicates"
+    if not local:
+        unit["local_evidence"] = "delivery-only; business acceptance deferred"
     if "acceptance_profile" in plan:
-        unit["acceptance_responsibilities"] = project_responsibilities(task, local, deferred)
+        unit["acceptance_responsibilities"] = project_responsibilities(replace(task, payload=payload), local, deferred)
     payload["execution_contract"] = unit
     payload["execution_contract_hash"] = "sha256:" + hashlib.sha256(canonical(unit).encode()).hexdigest()
-    # Replace the previous projection, retaining the immutable shared contract.
-    base = str(payload.get("prompt_text", "")).split("\nCURRENT EXECUTION CONTRACT\n", 1)[0]
-    payload["prompt_text"] = base + "\nCURRENT EXECUTION CONTRACT\n" + canonical(unit)
+    # Never inherit a parent's identity, delivery schema or rewrite instructions.
+    if plan.get("planning_standard") == "modular-v1":
+        estimates = [m["estimated_tokens"] for m in unit["module_contracts"]]
+        payload["estimated_tokens"] = sum(estimates)
+        payload["cost_estimate_source"] = "explicit functional-module output estimates"
+    from .work_unit import compile_prompt, request_cost
+    current = replace(task, payload=payload)
+    payload["prompt_text"] = compile_prompt(current, plan, unit)
+    payload["request_cost"] = request_cost(payload["prompt_text"], payload.get("estimated_tokens"),
+                                           payload.get("cost_estimate_source", "host estimate; not a token limit"))
     return replace(task, payload=payload)

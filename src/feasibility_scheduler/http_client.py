@@ -209,8 +209,11 @@ class HttpClient:
         if started_at.tzinfo is None:
             raise RequestValidationError("时间必须带时区")
 
+        stage = "transport"
+        status_code = 0
         try:
             status_code, raw_text, headers = self._post_chat(request)
+            stage = "response_processing"
             finished_at = self._clock()
             response = self._build_response(
                 request=request,
@@ -222,8 +225,9 @@ class HttpClient:
                 started_at=started_at,
                 finished_at=finished_at,
             )
-        except TimeoutError:
+        except TimeoutError as exc:
             finished_at = self._clock()
+            diagnostics = self._failure_diagnostics(request, exc, stage, status_code)
             response = ApiResponse(
                 request_id=request_id,
                 idempotency_key=request.idempotency_key,
@@ -243,22 +247,25 @@ class HttpClient:
                 started_at=started_at,
                 finished_at=finished_at,
                 input_artifact_hash=request.input_artifact_hash or "",
+                diagnostics=diagnostics,
             )
-        except Exception as exc:  # 网络层未知错误：当作可重试 server_error，不泄露 key
+        except Exception as exc:
             finished_at = self._clock()
             msg = _scrub(f"{type(exc).__name__}: {exc}", self._secrets)
+            diagnostics = self._failure_diagnostics(request, exc, stage, status_code)
+            local_failure = stage == "response_processing"
             response = ApiResponse(
                 request_id=request_id,
                 idempotency_key=request.idempotency_key,
                 task_id=request.task_id,
                 provider=self.provider,
                 model=request.model or self.model,
-                outcome=Outcome.SERVER_ERROR,
-                status_code=0,
+                outcome=Outcome.INVALID_JSON if local_failure else Outcome.SERVER_ERROR,
+                status_code=status_code,
                 raw_body=msg,
                 parsed_body=None,
                 usage={},
-                error_type="server_error",
+                error_type="client_processing_error" if local_failure else "transport_error",
                 retry_after_seconds=None,
                 is_duplicate=False,
                 duplicate_of=None,
@@ -266,6 +273,7 @@ class HttpClient:
                 started_at=started_at,
                 finished_at=finished_at,
                 input_artifact_hash=request.input_artifact_hash or "",
+                diagnostics=diagnostics,
             )
 
         # 用服务端 id 覆盖本地序号（若有）
@@ -499,6 +507,18 @@ class HttpClient:
             phase=phase,
         )
 
+    def _failure_diagnostics(self, request, exc, stage, status_code):
+        diagnostic = {"stage": stage, "exception_type": type(exc).__name__,
+                      "message": _scrub(str(exc), self._secrets), "http_status_code": status_code,
+                      "request_sent_status": "unknown" if stage == "transport" else "response-received",
+                      "task_id": request.task_id, "input_artifact_hash": request.input_artifact_hash}
+        try:
+            self._remember_raw(request, json.dumps(diagnostic, ensure_ascii=False), phase="failure")
+        except OSError as audit_exc:
+            # Preserve the original failure even if its raw audit directory is unwritable.
+            diagnostic["audit_write_error"] = _scrub(f"{type(audit_exc).__name__}: {audit_exc}", self._secrets)
+        return diagnostic
+
     def _fetch_format_repair(self, request: ApiRequest, prompt: str) -> RepairText | None:
         """恰好一次格式修复请求。取回正文前先落 Raw；失败则停止，不再请求。"""
         if request.metadata.get("allow_format_repair") is False:
@@ -688,6 +708,7 @@ class HttpClient:
             finished_at=first.finished_at,
             input_artifact_hash=first.input_artifact_hash,
             format_repair_used=first.format_repair_used,
+            diagnostics=first.diagnostics,
         )
         self._responses.append(duplicate)
         return duplicate

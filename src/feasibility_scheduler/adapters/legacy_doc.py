@@ -109,6 +109,7 @@ class LegacyDocConfig:
     acceptance_script: Path | None = None
     acceptance_profile: Mapping[str, Any] | None = None
     integration_files: tuple[str, ...] | None = None
+    planning_standard: str = "modular-v1"
 
 
 
@@ -447,6 +448,7 @@ def build_legacy_tasks(
             "deps": list(deps),
             "estimated_tokens": m.get("estimated_tokens"),
             "prompt_text": prompt,
+            "task_source": task_md,
             "reference_files": references,
             "external_checker_names": list(task_input.get("external_checker_names", [])),
         }
@@ -798,6 +800,8 @@ def _prepare_workdir(cfg: LegacyDocConfig) -> tuple[Path, Path]:
 
 
 def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
+    if cfg.planning_standard != "modular-v1":
+        raise ValueError("unsupported host planning standard")
     if not isinstance(cfg.contract_repair_limit, int) or isinstance(cfg.contract_repair_limit, bool) or cfg.contract_repair_limit < 0:
         raise ValueError("contract_repair_limit must be a nonnegative integer")
     task_input = load_task_input(cfg.task_input_path)
@@ -879,6 +883,7 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
 
     plan = task_input.get("contract_plan")
     if plan is None and kind in {"http", "real", "native"}:
+        tasks = [replace(t, payload={**t.payload, "planning_standard": cfg.planning_standard}) for t in tasks]
         plan = generate_plan(client, tasks, task_md, audit_dir=run_dir)
     if plan is not None:
         from feasibility_scheduler.adapters.contract_checks import requirement_ledger
