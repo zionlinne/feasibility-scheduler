@@ -59,3 +59,22 @@ def test_recovered_children_cannot_be_recovered_or_merged_again(tmp_path):
     assert all(t.payload["disable_merge"] for t in recovered.tasks)
     assert all(recover_failed_merge(recovered.tasks, t) is None for t in recovered.tasks)
     assert not any(c.kind == "merge" for c in generate_candidates(recovered.tasks, states={}))
+
+
+def test_status_zero_transport_failure_does_not_trigger_confirmed_5xx_recovery(tmp_path, monkeypatch):
+    cfg = setup_entries(tmp_path)
+    client = FakeClient([Step.server_error(), Step.server_error(), Step.server_error()])
+    send = client.acall
+
+    async def transport(request):
+        response = await send(request)
+        return replace(response, status_code=0, error_type="transport_error",
+                       diagnostics={"stage": "transport", "exception_type": "ConnectionResetError"})
+
+    client.acall = transport
+    monkeypatch.setattr("feasibility_scheduler.adapters.legacy_doc.create_client", lambda *a, **k: client)
+    outcome = run_legacy_doc(cfg)
+    assert not outcome.ok and outcome.verdict.trace_complete
+    summary = json.loads((cfg.workdir / "summary.json").read_text(encoding="utf-8"))
+    assert not any(row["kind"] == "recovery_split" for row in summary["rewrite_history"])
+    assert outcome.states["merge_a_b"].value == "FAILED"

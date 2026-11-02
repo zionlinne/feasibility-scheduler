@@ -289,3 +289,30 @@ model will produce a correct integration. Keep the edit scope small enough for
 the worker's output budget; existing peer implementations stay read-only. The
 lightweight regression uses scripted workers and one real Node entrypoint check;
 it does not demonstrate paid-provider reliability or re-run the original full task.
+
+### Functional planning and current-scope execution
+
+New real/native plans now use host `modular-v1` engineering constraints. A task
+can own several files representing one functional responsibility. The planner
+declares its boundary, invariants, interfaces, local checks and output-work
+estimate; it can keep a task whole or propose complete child contracts. Module
+count is not fixed. Existing supplied plans without `planning_standard` remain
+compatible and still receive the corrected execution-prompt projection.
+
+The scoring equation remains `score = estimated_benefit / estimated_cost`, with
+the same highest-score selection rule. Candidate admissibility and cost inputs
+change: functional modules cannot be split just because they contain several
+files, and unrelated modules cannot merge just because they are small. Only an
+explicit shared `cohesion_group` permits automatic merging. Estimates are no
+longer divided by the number of proposed children. Core DAG, Phi, time analysis,
+concurrency, state transitions and event replay algorithms are unchanged.
+
+Every rewrite compiles the current task identity, allowed outputs, response shape
+and module responsibilities from structured data. Old root/merge/split prompts
+are not inherited. Original specifications, immutable root checks and shared
+interfaces remain available as context. Declared upstream outputs are read at
+dispatch; `work-unit-*.json` records their hashes, compiled scope and estimated
+request size. Root predicates are always rechecked after integration.
+
+See [functional planning details](docs/FUNCTIONAL_PLANNING.md) for the contract
+fields, evidence limits, legacy compatibility and lightweight offline validation.

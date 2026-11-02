@@ -82,10 +82,12 @@ class GraphRewriteExecutor(ContractExecutionMixin, ArtifactMetadataExecutorMixin
             selected = None
             # Only recover terminal merged tasks whose last transport outcome is
             # known server_error. TIMEOUT/UNKNOWN remain under kernel recovery.
-            outcomes = {e.task_id: e.details.get("outcome") for e in self.log.events()
+            outcomes = {e.task_id: e.details for e in self.log.events()
                         if e.type == "api_request_failed" and e.details.get("outcome")}
             for task in self.tasks:
-                if states.get(task.id) == "FAILED" and outcomes.get(task.id) == "server_error":
+                failure = outcomes.get(task.id, {})
+                if (states.get(task.id) == "FAILED" and failure.get("outcome") == "server_error"
+                        and 500 <= failure.get("status_code", 0) <= 599):
                     selected = recover_failed_merge(self.tasks, task)
                     if selected is not None:
                         break

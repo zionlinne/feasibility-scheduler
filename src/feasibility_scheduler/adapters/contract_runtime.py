@@ -25,6 +25,9 @@ def composition_task(tasks: list[Task], plan: dict[str, Any]) -> Task:
     return Task(id=tid, dependencies=tuple(t.id for t in tasks), constraints_declared=True,
                 output_contract={"type": "object", "required": ["ok"]},
                 payload={"contract_plan": plan, "contract_composition": True, "owned_files": [],
+                         "contract_hash": tasks[0].payload.get("contract_hash", "sha256:" + hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()),
+                         "task_source": "\n\n".join(dict.fromkeys(t.payload.get("task_source", "") for t in tasks)),
+                         "reference_files": tasks[0].payload.get("reference_files", {}),
                          "repairable_files": sorted({p for task in tasks for p in task.payload.get("owned_files", ())}),
                          "reference_paths": sorted({p for task in tasks for p in task.payload.get("reference_files", {})}),
                          "prompt_text": "Evaluate the immutable root contract against all delivered artifacts.\nREAD-ONLY MATERIALS\n"
@@ -77,6 +80,14 @@ class ContractAcceptor:
             if not response.ok or not isinstance(files, Mapping) or set(files) != allowed or any(not isinstance(v, str) for v in files.values()):
                 return AcceptanceReport(task.id, False, errors=("repair must deliver exactly the assigned artifacts",))
         composition = task.payload.get("contract_composition")
+        if not composition and plan.get("planning_standard") == "modular-v1":
+            body = response.parsed_body
+            current = allowed or set(task.payload.get("owned_files", ()))
+            files = body.get("files") if isinstance(body, Mapping) else None
+            if (not response.ok or not isinstance(body, Mapping) or body.get("ok") is not True
+                    or body.get("delivery") not in (None, "files") or not isinstance(files, Mapping)
+                    or set(files) != current or any(not isinstance(v, str) for v in files.values())):
+                return AcceptanceReport(task.id, False, errors=("functional work unit must deliver all current owned files in one response",))
         base_results = []
         if composition:
             # Only the bounded repair request is allowed to replace existing artifacts.
@@ -97,7 +108,8 @@ class ContractAcceptor:
             base_report = self.base(delivery_task, response)
             if not base_report.passed or base_report.error:
                 return base_report
-            ids = set(task.payload["execution_contract"]["local_checks"])
+            unit = task.payload["execution_contract"]
+            ids = set(unit["local_checks"] + unit.get("integration_checks", []))
         results = list(base_results)
         if all(r["status"] == "passed" for r in base_results):
             results.extend(evaluate_checks(plan, self.sink.workspace, ids=ids, external_checkers=self.external_checkers,
@@ -212,12 +224,8 @@ class ContractExecutionMixin:
             feedback = {"task_id": task_id, "revision": revision, "errors": list(report.errors),
                         "repair_files": paths, "artifacts": artifacts,
                         "read_only_artifacts": self.acceptor.read_context(task, paths)}
-            prompt = (str(task.payload.get("prompt_text", "")) + "\nIMMUTABLE CONTRACT\n"
-                      + json.dumps(task.payload["contract_plan"], ensure_ascii=False)
-                      + "\nCOUNTEREXAMPLE FEEDBACK\n" + json.dumps(feedback, ensure_ascii=False)
-                      + '\nRepair the assigned artifacts. Keep all original requirements and checks. '
-                        'Use read_only_artifacts as current integration context; never modify or return those files. '
-                        'Return only {"ok":true,"files":{"assigned/path":"complete corrected content"}}.')
+            from .work_unit import compile_repair_prompt
+            prompt = compile_repair_prompt(task, paths, feedback)
             # Persist counterexamples even if the following provider request fails.
             audit_id = hashlib.sha256(task_id.encode()).hexdigest()[:16]
             (self.acceptor.audit_dir / f"contract-repair-{audit_id}-{revision}.json").write_text(
