@@ -138,8 +138,20 @@ def validate_checks(plan: dict[str, Any], tasks: Sequence[Task]) -> None:
 
 
 def evaluate_checks(plan: dict[str, Any], workspace: Path, *, ids: set[str] | None = None,
-                    external_checkers=None) -> list[dict[str, Any]]:
+                    external_checkers=None, version_paths: set[str] | None = None) -> list[dict[str, Any]]:
     results = []
+    external_results = {}  # One evaluation only; never carry verdicts across repair rounds.
+    observed_paths = set(version_paths or ()) | {p for check in plan["checks"] for p in check_paths(check)}
+
+    def workspace_version():
+        root = workspace.resolve()
+        versions = []
+        for path in sorted(observed_paths):
+            target = (root / path).resolve()
+            target.relative_to(root)
+            versions.append((path, hashlib.sha256(target.read_bytes()).hexdigest() if target.is_file() else None))
+        return "sha256:" + hashlib.sha256(json.dumps(versions, separators=(",", ":")).encode()).hexdigest()
+
     for check in plan["checks"]:
         if ids is not None and check["id"] not in ids:
             continue
@@ -150,10 +162,22 @@ def evaluate_checks(plan: dict[str, Any], workspace: Path, *, ids: set[str] | No
                 result["detail"] = "trusted checker is not configured"
             else:
                 try:
-                    checked = checker(workspace)
-                    if checked.get("status") not in {"passed", "failed", "unverified"}:
-                        raise ValueError("invalid external checker result")
+                    version = workspace_version()
+                    key = (check["name"], version)
+                    reused = key in external_results
+                    if not reused:
+                        try:
+                            checked = checker(workspace)
+                            if checked.get("status") not in {"passed", "failed", "unverified"}:
+                                raise ValueError("invalid external checker result")
+                            if workspace_version() != version:
+                                raise ValueError("external checker changed observed artifacts during verification")
+                            external_results[key] = dict(checked)
+                        except Exception as exc:
+                            external_results[key] = {"status": "unverified", "detail": f"external checker error: {type(exc).__name__}: {exc}"}
+                    checked = external_results[key]
                     result.update(status=checked["status"], detail=checked.get("detail", ""))
+                    result.update(execution="reused" if reused else "executed", workspace_version=version)
                 except Exception as exc:
                     result["detail"] = f"external checker error: {type(exc).__name__}: {exc}"
         elif check["kind"] == "manual":

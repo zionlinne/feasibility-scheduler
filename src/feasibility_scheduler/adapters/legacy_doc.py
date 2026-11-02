@@ -45,6 +45,7 @@ from feasibility_scheduler.store import TaskStore
 from feasibility_scheduler.adapters.acs_text_extract import extract_delivery_map
 from feasibility_scheduler.adapters.artifact_request import ArtifactMetadataExecutorMixin
 from feasibility_scheduler.adapters.contract_runtime import ContractExecutionMixin
+from feasibility_scheduler.adapters.workspace_validation import workspace_file_checks
 
 
 def _to_plain(value: Any) -> Any:
@@ -753,42 +754,12 @@ def legacy_artifact_acceptor(
         if mode == "node-check":
             # 只对实际交付的 JS 文件做语法检查；非 JS 跳过。
             check_targets = written if delivery_mode == "file" else list(expected)
-            for path in check_targets:
-                target = sink.workspace / path
-                if not _is_node_checkable(path):
-                    checks.append(f"skip_node_check_non_js:{path}")
-                    continue
-                checks.append(f"node_check:{path}")
-                if not target.is_file():
-                    errors.append(f"落盘后找不到 {path}")
-                    continue
-                try:
-                    proc = subprocess.run(
-                        ["node", "--check", str(target)],
-                        capture_output=True,
-                        text=True,
-                        timeout=60,
-                        cwd=str(sink.workspace),
-                    )
-                except FileNotFoundError as exc:
-                    validator_errors.append(
-                        f"VALIDATOR_ERROR: node 不可用，无法执行 --check：{exc}"
-                    )
-                    continue
-                except (OSError, subprocess.TimeoutExpired) as exc:
-                    validator_errors.append(
-                        f"VALIDATOR_ERROR: node --check 无法执行：{exc}"
-                    )
-                    continue
-                if proc.returncode != 0:
-                    err = (proc.stderr or proc.stdout or "").strip()[:500]
-                    # 防御：若仍因扩展名被 node 拒绝，归为验收器错误而非产品代码失败
-                    if "ERR_UNKNOWN_FILE_EXTENSION" in err or "Unknown file extension" in err:
-                        validator_errors.append(
-                            f"VALIDATOR_ERROR: 对非 JS 文件调用了 node --check：{path}: {err}"
-                        )
-                    else:
-                        errors.append(f"node --check 失败 {path}: {err}")
+            for result in workspace_file_checks(sink.workspace, check_targets, mode, node_checkable=_is_node_checkable):
+                checks.extend(result["checks"])
+                if result["status"] == "failed":
+                    errors.append(result["detail"])
+                elif result["status"] == "unverified":
+                    validator_errors.append(result["detail"])
 
         if validator_errors:
             # 验收器配置/文件类型/运行时错误 → error 字段，不当产品代码 errors
@@ -932,7 +903,8 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
     if plan is not None:
         from feasibility_scheduler.adapters.contract_runtime import ContractAcceptor
         acceptor = ContractAcceptor(acceptor, sink, run_dir, repairable_files=owned,
-                                    external_checkers=external_checkers)
+                                    external_checkers=external_checkers,
+                                    workspace_validator=lambda paths: workspace_file_checks(workspace, paths, cfg.acceptance))
 
     # 外部门禁：只登记当前启用的适配验收模式（judge_run 要求全部为真）
     external = {

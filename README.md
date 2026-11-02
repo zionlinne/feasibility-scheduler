@@ -196,3 +196,28 @@ unknown reads, unowned repairs and malformed lists are rejected with the check
 ID, field name and invalid paths. These fields control contract responsibility
 and model repair authorization, not operating-system isolation of a trusted
 host checker, which still receives the workspace directory.
+
+### Composition repair and verification versions
+
+Composition validates the existence of **all** owned outputs and reruns the
+configured foundation checks, including `node --check` in node-check mode,
+before running business predicates. This happens on the initial root evaluation
+and after every repair. Invalid repaired syntax cannot inherit an earlier child
+pass; validator failures remain UNVERIFIED. Failed syntax identifies its output
+file as the repair target. Interface behavior still requires real integration
+tests; a syntax check alone does not establish interface compatibility.
+
+Repair feedback separates editable `artifacts` from `read_only_artifacts`. The
+latter contains current file contents from relevant check read scopes and is
+included in the model prompt, so a consumer repair can inspect its provider.
+These context files never expand repair authorization; redelivery still requires
+exactly the authorized output subset. Missing context files are shown as null.
+
+Within one evaluation, aliases of the same named workspace checker reuse one
+result per observed artifact version. Version hashes cover declared check paths,
+all host-owned outputs, and registered root reference paths. Every alias retains
+its own source/category links, result and executed/reused audit marker. Passed,
+failed and UNVERIFIED results are all shared without turning unknowns into passes.
+A new repair/evaluation round starts fresh; changes invalidate the version, and
+a checker that changes observed artifacts cannot produce a valid pass. This is
+per-evaluation memoization, not a persistent cache or a new retry policy.
