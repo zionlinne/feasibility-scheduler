@@ -155,6 +155,19 @@ validation cannot infer natural-language meaning or prove arbitrary programs.
 The profile does not generate missing business tests or convert unknown results
 into passes. No automatic paid planning retries are added.
 
+Before strict responsibility validation, the host can complete missing **root**
+evidence references using checks already in the plan. Candidates must explicitly
+declare the missing source IDs and satisfy that category's predicate/checker
+policy. All missing IDs must have approved evidence before any link is added.
+Only the assignment's check-ID list changes; source requirements, test predicates,
+owners and scopes remain untouched. No new checks or coverage claims are invented,
+and local responsibilities are not reassigned. Missing or weaker evidence still
+blocks dispatch. This is evidence-index compilation, not a semantic proof or an
+extra model call. Raw candidates remain unchanged; added links and source IDs are
+recorded in `contract-validation.json` for generated plans or
+`acceptance-preflight.json` for supplied plans. Strict errors name the missing IDs
+and attached checks. The compiled `contract.json` is frozen before execution.
+
 ### External reads versus repair permission
 
 ```json

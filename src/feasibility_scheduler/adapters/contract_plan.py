@@ -216,8 +216,9 @@ def generate_plan(client: Any, tasks: Sequence[Task], task_md: str, *, audit_dir
         validation["source_ledger_owner"] = "host"
         validation["ignored_model_source_fields"] = bind_source_requirements(plan, task_md)
         if profile is not None:
-            from .acceptance_profile import bind_profile
+            from .acceptance_profile import bind_profile, complete_root_references
             bind_profile(plan, profile)
+            validation["completed_root_references"] = complete_root_references(plan, tasks)
         validate_plan(plan, tasks)
         validation["status"] = "passed"
     except (ValueError, TypeError) as exc:

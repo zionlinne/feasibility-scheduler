@@ -905,6 +905,8 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
         try:
             if profile is not None:
                 bind_profile(plan, profile)
+                from .acceptance_profile import complete_root_references
+                preflight["completed_root_references"] = complete_root_references(plan, tasks)
             from .contract_plan import validate_plan
             validate_plan(plan, tasks)
             validate_responsibilities(plan, tasks, checkers=external_checkers)

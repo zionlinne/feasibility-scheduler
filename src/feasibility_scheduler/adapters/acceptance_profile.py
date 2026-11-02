@@ -71,6 +71,57 @@ def bind_profile(plan: dict[str, Any], profile: dict[str, Any]) -> None:
     plan["acceptance_profile"] = copy.deepcopy(profile)
 
 
+def complete_root_references(plan: dict[str, Any], tasks: Sequence[Task]) -> list[dict[str, Any]]:
+    """Compile missing root evidence links, without inventing tests or coverage claims.
+
+    Every check already runs at composition. Linking its declared source IDs to
+    another compatible root obligation changes only the evidence index. Local
+    ownership, requirement sets and predicate definitions are never rewritten.
+    """
+    profile = plan.get("acceptance_profile")
+    if profile is None:
+        return []
+    validate_profile(profile)
+    from .contract_checks import validate_checks
+    validate_checks(plan, tasks)
+    categories = {c["id"]: c for c in profile["categories"] if c["applicable"]}
+    checks = {c["id"]: c for c in plan["checks"]}
+    known = {r["id"] for r in plan["requirements"]}
+    repairs = []
+    assignments = plan.get("acceptance_assignments")
+    if not isinstance(assignments, list):
+        return repairs  # The strict validator reports malformed/missing assignments.
+    for assignment in assignments:
+        if (not isinstance(assignment, dict) or assignment.get("scope") != "root"
+                or assignment.get("owners") != [ROOT]):
+            continue
+        cid = assignment.get("category")
+        if not isinstance(cid, str) or cid not in categories:
+            continue
+        refs = _strings(assignment.get("requirements"), "assignment.requirements")
+        attached = _strings(assignment.get("checks"), "assignment.checks")
+        if not set(refs) <= known or not set(attached) <= checks.keys():
+            continue
+        covered = {r for check_id in attached for r in checks[check_id]["requirements"]}
+        missing = set(refs) - covered
+        if not missing:
+            continue
+        category = categories[cid]
+        candidates = [check for check in plan["checks"]
+                      if check["id"] not in attached and missing.intersection(check["requirements"])
+                      and check["kind"] in category["allowed_kinds"]
+                      and (check["kind"] != "external" or check["name"] in category.get("checker_names", []))]
+        available = {r for check in candidates for r in check["requirements"]}
+        if not missing <= available:
+            continue  # Never shrink the obligation or substitute weaker evidence.
+        added = [check["id"] for check in candidates]
+        assignment["checks"] = attached + added
+        repairs.append({"assignment_id": assignment.get("id"), "category": cid,
+                        "missing_requirements": sorted(missing), "added_checks": added,
+                        "reason": "Link existing category-approved evidence to root obligation"})
+    return repairs
+
+
 def validate_responsibilities(plan: dict[str, Any], tasks: Sequence[Task], *, checkers=None) -> None:
     profile = plan.get("acceptance_profile")
     if profile is None:
@@ -130,7 +181,8 @@ def validate_responsibilities(plan: dict[str, Any], tasks: Sequence[Task], *, ch
                 raise ValueError(f"acceptance assignment {aid}: check paths exceed responsible owners")
             evidence_requirements.update(check["requirements"])
         if not set(refs) <= evidence_requirements:
-            raise ValueError(f"acceptance assignment {aid}: checks do not cover its requirements")
+            raise ValueError(f"acceptance assignment {aid}: checks do not cover its requirements; "
+                             f"missing {sorted(set(refs) - evidence_requirements)}; attached checks {check_ids}")
         covered_categories.add(cid)
         covered_requirements.update(refs)
         assigned_checks.update(check_ids)
