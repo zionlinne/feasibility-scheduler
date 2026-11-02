@@ -18,7 +18,7 @@ from feasibility_scheduler.validation import validate_tasks
 
 from .artifact_request import ArtifactMetadataExecutorMixin
 from .contract_runtime import ContractExecutionMixin
-from .graph_rewrite import RewriteCandidate, decide_rewrite
+from .graph_rewrite import RewriteCandidate, decide_rewrite, recover_failed_merge
 
 COMPONENT = "rewrite_adapter"
 
@@ -79,7 +79,20 @@ class GraphRewriteExecutor(ContractExecutionMixin, ArtifactMetadataExecutorMixin
                 if last.get("kind") == "keep" and last.get("fingerprint") == fp:
                     return None
 
-            selected, all_cands = decide_rewrite(self.tasks, states=states)
+            selected = None
+            # Only recover terminal merged tasks whose last transport outcome is
+            # known server_error. TIMEOUT/UNKNOWN remain under kernel recovery.
+            outcomes = {e.task_id: e.details.get("outcome") for e in self.log.events()
+                        if e.type == "api_request_failed" and e.details.get("outcome")}
+            for task in self.tasks:
+                if states.get(task.id) == "FAILED" and outcomes.get(task.id) == "server_error":
+                    selected = recover_failed_merge(self.tasks, task)
+                    if selected is not None:
+                        break
+            if selected is None:
+                selected, all_cands = decide_rewrite(self.tasks, states=states)
+            else:
+                all_cands = [selected]
             for cand in all_cands:
                 self.log.record(
                     "candidate_generated",

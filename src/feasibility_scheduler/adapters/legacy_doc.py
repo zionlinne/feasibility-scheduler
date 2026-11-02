@@ -385,6 +385,8 @@ def _module_prompt(
         + delivery_rules
         + "- 仅使用 Node.js 24 标准库；禁止第三方依赖。\n"
         "- 严格按题目行为实现，不要发明额外 API。\n"
+        "- 拆分后以 CURRENT EXECUTION CONTRACT 为准，通过共享接口使用其他任务的模块；"
+        "不要在一个文件中重复实现兄弟模块职责、使其交付物闲置。正式 Node 验收会记录实际模块加载与函数执行。\n"
         "- 若信息不足，仍须给出可 `node --check` 通过的最佳努力实现，并在 notes 说明假设。"
         "（仅对 .js/.mjs/.cjs；README.md 等非 JS 不要指望 node --check。）\n\n"
         "## 题目规格 TASK.md\n\n"
@@ -804,7 +806,12 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
     external_checkers = dict(cfg.external_checkers or {})
     if cfg.acceptance_script is not None:
         from .external_verifier import node_verifier
-        external_checkers["task-acceptance"] = node_verifier(cfg.acceptance_script, cfg.workdir)
+        selected = set(cfg.module_ids) if cfg.module_ids is not None else None
+        execution_files = sorted({p for module in task_input["modules"]
+                                  if selected is None or module["module_id"] in selected
+                                  for p in module.get("owned_files", []) if isinstance(p, str) and _is_node_checkable(p)})
+        external_checkers["task-acceptance"] = node_verifier(cfg.acceptance_script, cfg.workdir,
+                                                          required_execution_files=execution_files)
     task_input["external_checker_names"] = sorted(
         set(task_input.get("external_checker_names", [])) | set(external_checkers)
     )

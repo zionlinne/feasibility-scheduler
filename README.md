@@ -221,3 +221,37 @@ failed and UNVERIFIED results are all shared without turning unknowns into passe
 A new repair/evaluation round starts fresh; changes invalidate the version, and
 a checker that changes observed artifacts cannot produce a valid pass. This is
 per-evaluation memoization, not a persistent cache or a new retry policy.
+
+### Exhausted merged requests and actual module participation
+
+In rewrite mode, a merged multi-file task that exhausts its existing server-error
+retries can be split back into per-file tasks once. The failed task stays in the
+audit history, active dependencies are retargeted, and the recovered children
+cannot merge again or trigger another fallback split. Already accepted peers are
+preserved. TIMEOUT/UNKNOWN are not treated as confirmed failures and never trigger
+this fallback. The ordinary per-task retry limit still applies to the new tasks;
+this is a bounded change of delivery shape, not a guarantee that an unavailable
+provider will recover. Fixed-DAG mode retains its existing behavior.
+
+When `--acceptance-script` is used, all selected owned `.js/.mjs/.cjs` outputs
+must have execution evidence from that actual Node suite. The host enables V8
+coverage in the verifier and inherited Node subprocesses, records actual process
+entrypoints, and flushes server coverage before HTTP response completion so a
+subsequent forced server stop cannot erase it. The trusted preload lives outside
+the solution; source files are not rewritten. Worker prompts explicitly require
+shared-interface collaboration rather than duplicating sibling responsibilities.
+
+Root acceptance fails even with a passing business report if required modules
+were never loaded, or a loaded non-entrypoint module contains functions but none
+were called. Actual entrypoint execution and constant-only modules are handled
+separately. `module-execution-N.json` records required files, loaded/called flags
+and missing evidence; raw V8 evidence remains in `module-coverage-N/`. Integration
+repair context includes current peer output contents without granting write access.
+
+These observations block unused-module/monolithic bypasses like a runtime that
+ignores all generated domain files. They are necessary execution witnesses, not
+proof that every module fulfills its entire semantic responsibility or every
+branch was tested. The business suite remains mandatory. This automatic witness
+is Node-specific; other runtimes require their own trusted acceptance adapters.
+Host-owned test/helper files that the selected suite never executes will also be
+reported as missing evidence; choose the ownership/verification scope accordingly.

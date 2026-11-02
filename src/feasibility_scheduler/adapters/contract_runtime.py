@@ -114,6 +114,8 @@ class ContractAcceptor:
         relevant = [c for c in task.payload["contract_plan"]["checks"]
                     if c["id"] in failed or check_paths(c).intersection(repair_files)]
         paths = {p for c in relevant for p in check_paths(c)} - set(repair_files)
+        if task.payload.get("contract_composition"):
+            paths.update((self.repairable_files or set(task.payload.get("repairable_files", ()))) - set(repair_files))
         contents = {}
         root = self.sink.workspace.resolve()
         for path in sorted(paths):
