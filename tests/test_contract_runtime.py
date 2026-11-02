@@ -5,6 +5,7 @@ from dataclasses import replace
 import pytest
 
 from feasibility_scheduler.adapters.contract_checks import requirement_ledger
+from feasibility_scheduler.adapters.contract_checks import evaluate_checks
 from feasibility_scheduler.adapters.contract_plan import attach_plan, validate_plan
 from feasibility_scheduler.adapters.contract_runtime import composition_task
 from feasibility_scheduler.adapters.graph_rewrite import generate_candidates
@@ -177,3 +178,14 @@ def test_root_repair_rechecks_previously_passed_local_conditions(tmp_path, monke
     outcome = run_legacy_doc(cfg)
     assert not outcome.ok and outcome.reports["a"].passed
     assert any("a-total" in error for error in outcome.reports["__contract_composition__"].errors)
+
+
+def test_whole_json_object_check_rejects_extra_keys(tmp_path):
+    check = {"id": "exact", "kind": "json_equals", "path": "offer.json", "key": [],
+             "value": {"total": 1200}, "requirements": ["R1"]}
+    plan = {"checks": [check]}
+    target = tmp_path / "offer.json"
+    target.write_text('{"total":1200}', encoding="utf-8")
+    assert evaluate_checks(plan, tmp_path)[0]["status"] == "passed"
+    target.write_text('{"total":1200,"unexpected":true}', encoding="utf-8")
+    assert evaluate_checks(plan, tmp_path)[0]["status"] == "failed"

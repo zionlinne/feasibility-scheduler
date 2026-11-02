@@ -71,8 +71,7 @@ def generate_plan(client: Any, tasks: Sequence[Task], task_md: str) -> dict[str,
     }
     from .contract_checks import requirement_ledger
     example["requirements"] = requirement_ledger(task_md)
-    example["checks"] = [{"id": "root-review", "kind": "manual", "note": "Replace with executable checks where possible",
-                          "requirements": [r["id"] for r in example["requirements"]]}]
+    example["checks"] = []
     example["decompositions"] = []
     prompt = (
         "Generate a domain-neutral contract plan as one JSON object with the following shape. "
@@ -81,9 +80,22 @@ def generate_plan(client: Any, tasks: Sequence[Task], task_md: str) -> dict[str,
         "[{id: unique_id, owned_files: [artifact_path], postcondition: concrete_deliverable}]}], "
         "partitioning the parent's artifacts exactly, including non-code artifacts. "
         "Copy requirements unchanged. Every requirement must reference at least one check via checks[].requirements. "
+        'Every check object MUST have "id" (unique string), "kind" (predicate name), and "requirements" '
+        '(source ID list). Use the field name "kind", never "type". Example check object: '
+        '{"id":"exact-artifact","kind":"json_equals","path":"artifact.json","key":[],"value":{"x":1},"requirements":["R1"]}. '
+        "Adapt the example path, value, IDs and predicate to TASK. "
         "Checks support file_exists(path), text_contains(path,value), json_equals(path,key,value), "
         "json_match(path,key,other_path,other_key), and manual(note). key/other_key are lists of object keys. "
-        "Use manual for obligations these checks cannot establish; manual remains UNVERIFIED. "
+        "An empty key [] selects the ENTIRE JSON value. For example, json_equals with key=[] "
+        "and value={\"x\":1} checks the exact object, including its key set, and rejects extra keys. "
+        "Use whole-object equality when TASK specifies an exact JSON object; no manual key-set review is needed. "
+        "Populate checks with the smallest sufficient executable predicates. Do not add a blanket root-review "
+        "or a manual duplicate of an executable check. Use manual only for a specific mandatory obligation "
+        "that none of the supported predicates can establish; manual remains UNVERIFIED. "
+        "Distinguish mandatory outcomes from permissions and explanatory context. A statement such as "
+        "'may run in parallel' permits a scheduling choice; it does not require proving parallelism "
+        "or human approval. Keep that source line in requirements and reference it from the relevant "
+        "deliverable checks, without inventing additional mandatory acceptance conditions. "
         "Distinguish source requirements from design decisions in handoff. "
         "Only execution_dependencies require actual upstream artifacts before starting. "
         "Interface dependencies can run in parallel using shared agreed representations. "
