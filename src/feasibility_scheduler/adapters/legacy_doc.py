@@ -24,7 +24,7 @@ import json
 import os
 import subprocess
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -106,6 +106,7 @@ class LegacyDocConfig:
     native_bridge_dir: Path | None = None
     external_checkers: Mapping[str, Any] | None = None
     acceptance_script: Path | None = None
+    acceptance_profile: Mapping[str, Any] | None = None
 
 
 
@@ -837,10 +838,27 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
         set(task_input.get("external_checker_names", [])) | set(external_checkers)
     )
     task_md = Path(cfg.task_md_path).read_text(encoding="utf-8")
+    profile = cfg.acceptance_profile if cfg.acceptance_profile is not None else task_input.get("acceptance_profile")
+    if cfg.acceptance_profile is not None and "acceptance_profile" in task_input and task_input["acceptance_profile"] != profile:
+        raise ValueError("conflicting host acceptance profiles in config and task input")
+    if profile is not None:
+        task_input["acceptance_profile"] = profile
     tasks = build_legacy_tasks(
         task_input, task_md=task_md, module_ids=cfg.module_ids
     )
     run_dir, workspace = _prepare_workdir(cfg)
+    from .acceptance_profile import validate_profile, validate_responsibilities, bind_profile
+    if profile is not None:
+        preflight = {"phase": "capabilities", "status": "failed", "profile_id": profile.get("id") if isinstance(profile, dict) else None}
+        try:
+            validate_profile(profile, external_checkers)
+            preflight["status"] = "passed"
+        except ValueError as exc:
+            preflight["error"] = str(exc)
+            raise
+        finally:
+            (run_dir / "acceptance-preflight.json").write_text(json.dumps(preflight, ensure_ascii=False, indent=2), encoding="utf-8")
+        tasks = [replace(t, payload={**t.payload, "acceptance_profile": dict(profile)}) for t in tasks]
     (run_dir / "effective-task-input.json").write_text(
         json.dumps(task_input, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -883,6 +901,20 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
             raise ValueError("runtime contract enforcement requires version 2; migrate textual contracts to executable checks")
         if plan.get("requirements") != requirement_ledger(task_md):
             raise ValueError("contract requirements differ from the original TASK source")
+        preflight = {"phase": "responsibilities", "status": "failed"}
+        try:
+            if profile is not None:
+                bind_profile(plan, profile)
+            from .contract_plan import validate_plan
+            validate_plan(plan, tasks)
+            validate_responsibilities(plan, tasks, checkers=external_checkers)
+            preflight["status"] = "passed"
+        except ValueError as exc:
+            preflight["error"] = str(exc)
+            raise
+        finally:
+            if profile is not None:
+                (run_dir / "acceptance-preflight.json").write_text(json.dumps(preflight, ensure_ascii=False, indent=2), encoding="utf-8")
         tasks = attach_plan(tasks, plan)
         (run_dir / "contract.json").write_text(
             json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -949,13 +981,14 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
         "final_task_ids": list(outcome.states.keys()),
         "rewrite_history": rewrite_history,
         "contract_check_results": getattr(acceptor, "results", {}),
+        "acceptance_profile_id": profile["id"] if profile is not None else None,
         "workdir": str(run_dir),
         "workspace": str(workspace),
         "written_files": list(sink.written),
         "delivery": sink.delivery_snapshot(),
         "limitations": [
-            "旧题完整 Node 行为验收（33 ops / CLI / HTTP / 持久化）未接入本适配层；"
-            f"当前 acceptance={cfg.acceptance}。",
+            f"基础交付验收模式为 {cfg.acceptance}；业务验收能力由宿主注册检查器提供："
+            f"{sorted(external_checkers)}。检查器已注册不代表业务验收已通过。",
             "模型须返回 JSON；推荐 manifest/file 逐文件交付；批量 files 仍兼容但易触顶。"
             "触顶截断标 OUTPUT_TRUNCATED；JSON 失败且抽不出文件为 "
             "invalid_format_no_artifact，只允许一次 ACS fence 格式修复。",
