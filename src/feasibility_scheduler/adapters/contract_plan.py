@@ -188,7 +188,11 @@ def generate_plan(client: Any, tasks: Sequence[Task], task_md: str, *, audit_dir
         + "\nTRUSTED EXTERNAL CHECKER NAMES\n"
         + canonical(list(tasks[0].payload.get("external_checker_names", [])) if tasks else [])
         + '\nWhen applicable, use {"id":"integration","kind":"external","name":"trusted-name",'
-          '"paths":["owned/output/path"],"requirements":["R1"]} to execute the registered checker. '
+          '"read_paths":["owned/output/path","provided/input/path"],'
+          '"repair_paths":["owned/output/path"],"requirements":["R1"]} to execute the registered checker. '
+          'read_paths lists artifacts/materials relevant to verification, including registered read-only inputs. '
+          'repair_paths lists only owned outputs that may be replaced after failure; use [] if nothing is repairable. '
+          'Never assign ownership or repair permission to provided materials. Do not use the legacy paths field. '
           'Only registered names are valid; no shell commands can be supplied by the model. '
           'A complete supplied black-box suite can discharge requirements it tests; retain manual obligations '
           'for requirements outside its coverage. Include concrete shared function signatures and state shape '

@@ -17,10 +17,22 @@ def requirement_ledger(task_md: str) -> list[dict[str, str]]:
 
 
 def check_paths(check: dict[str, Any]) -> set[str]:
+    """Artifacts relevant to a check, for responsibility projection (not write permission)."""
     paths = {check[key] for key in ("path", "other_path") if isinstance(check.get(key), str)}
     if check.get("kind") == "external":
-        paths.update(check.get("paths", []))
+        paths.update(check.get("read_paths", check.get("paths", [])))
+        paths.update(check.get("repair_paths", []))
     return paths
+
+
+def check_repair_paths(check: dict[str, Any], *, owned: set[str]) -> set[str]:
+    """Reading an input never grants permission to replace it during repair."""
+    if check.get("kind") == "external":
+        # Legacy paths were ambiguous: infer repair permission only for owned outputs.
+        paths = set(check.get("repair_paths", check.get("paths", [])))
+    else:
+        paths = check_paths(check)
+    return paths & owned
 
 
 def validate_checks(plan: dict[str, Any], tasks: Sequence[Task]) -> None:
@@ -63,11 +75,22 @@ def validate_checks(plan: dict[str, Any], tasks: Sequence[Task]) -> None:
             raise ValueError("unsupported check kind")
         if kind == "external":
             names = {name for task in tasks for name in task.payload.get("external_checker_names", [])}
-            paths = check.get("paths")
-            if (not isinstance(check.get("name"), str) or check["name"] not in names
-                    or not isinstance(paths, list) or not paths
-                    or any(not isinstance(p, str) or p not in owned for p in paths)):
-                raise ValueError("external check must name a trusted checker and owned repair scope")
+            if not isinstance(check.get("name"), str) or check["name"] not in names:
+                raise ValueError(f"external check {check['id']}: unregistered trusted checker {check.get('name')!r}")
+            explicit = "read_paths" in check or "repair_paths" in check
+            if explicit and "paths" in check:
+                raise ValueError(f"external check {check['id']}: use read_paths/repair_paths or legacy paths, not both")
+            fields = (("read_paths", set(owned) | references, False), ("repair_paths", set(owned), True)) if explicit else (
+                ("paths", set(owned) | references, False),)
+            for key, allowed, allow_empty in fields:
+                paths = check.get(key)
+                if (not isinstance(paths, list) or (not paths and not allow_empty)
+                        or any(not isinstance(p, str) for p in paths) or len(paths) != len(set(paths))):
+                    raise ValueError(f"external check {check['id']}: {key} must be a unique relative path list")
+                invalid = [p for p in paths if p not in allowed]
+                if invalid:
+                    permission = "owned outputs only" if key == "repair_paths" else "owned outputs or registered read-only materials"
+                    raise ValueError(f"external check {check['id']}: {key} contains invalid paths {invalid!r}; expected {permission}")
             continue
         if kind == "manual":
             if not isinstance(check.get("note"), str) or not check["note"].strip():

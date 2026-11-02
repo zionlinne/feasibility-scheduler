@@ -13,7 +13,7 @@ from feasibility_scheduler.acceptance import AcceptanceReport, run_acceptance
 from feasibility_scheduler.fake_client import ApiRequest, FakeClient, Step
 from feasibility_scheduler.models import Task
 
-from .contract_checks import check_paths, evaluate_checks
+from .contract_checks import check_repair_paths, evaluate_checks
 
 
 def composition_task(tasks: list[Task], plan: dict[str, Any]) -> Task:
@@ -23,6 +23,7 @@ def composition_task(tasks: list[Task], plan: dict[str, Any]) -> Task:
     return Task(id=tid, dependencies=tuple(t.id for t in tasks), constraints_declared=True,
                 output_contract={"type": "object", "required": ["ok"]},
                 payload={"contract_plan": plan, "contract_composition": True, "owned_files": [],
+                         "repairable_files": sorted({p for task in tasks for p in task.payload.get("owned_files", ())}),
                          "prompt_text": "Evaluate the immutable root contract against all delivered artifacts.\nREAD-ONLY MATERIALS\n"
                          + json.dumps(tasks[0].payload.get("reference_files", {}), ensure_ascii=False)})
 
@@ -48,21 +49,26 @@ class ContractAcceptor:
         plan = task.payload.get("contract_plan")
         if not plan or plan.get("version") != 2:
             return self.base(task, response)
+        allowed = set(task.payload.get("contract_repair_files", ()))
+        if allowed:
+            body = response.parsed_body
+            files = body.get("files") if isinstance(body, Mapping) else None
+            if not response.ok or not isinstance(files, Mapping) or set(files) != allowed or any(not isinstance(v, str) for v in files.values()):
+                return AcceptanceReport(task.id, False, errors=("repair must deliver exactly the assigned artifacts",))
         if task.payload.get("contract_composition"):
             # Only the bounded repair request is allowed to replace existing artifacts.
-            allowed = set(task.payload.get("contract_repair_files", ()))
-            body = response.parsed_body
             if allowed:
-                files = body.get("files") if isinstance(body, Mapping) else None
-                if not response.ok or not isinstance(files, Mapping) or set(files) != allowed or any(not isinstance(v, str) for v in files.values()):
-                    return AcceptanceReport(task.id, False, errors=("repair must deliver exactly the assigned artifacts",))
                 for path, content in files.items():
                     delivered = self.sink.deliver_file(path, content)
                     if delivered["status"] != "delivered":
                         return AcceptanceReport(task.id, False, errors=(f"repair delivery failed: {path}",))
             ids = None  # Recheck all local obligations after any composition repair.
         else:
-            base_report = self.base(task, response)
+            # Validate/deliver only the repair subset, then recheck the full local
+            # contract against both repaired and unchanged artifacts.
+            delivery_task = replace(task, payload={**task.payload, "owned_files": sorted(allowed),
+                                                   "outputs": sorted(allowed)}) if allowed else task
+            base_report = self.base(delivery_task, response)
             if not base_report.passed or base_report.error:
                 return base_report
             ids = set(task.payload["execution_contract"]["local_checks"])
@@ -79,12 +85,16 @@ class ContractAcceptor:
                                 error=f"UNVERIFIED: {unknown}" if unknown else None)
 
     def repair_files(self, task: Task) -> list[str]:
-        if not task.payload.get("contract_composition"):
-            return sorted(task.payload.get("owned_files", ()))
+        composition = task.payload.get("contract_composition")
+        if composition:
+            owned = self.repairable_files if self.repairable_files is not None else set(task.payload.get("repairable_files", ()))
+        else:
+            owned = set(task.payload.get("owned_files", ()))
+        if not composition and task.id not in self.results:
+            return sorted(owned)  # Delivery failed before any contract predicate ran.
         failed = {r["id"] for r in self.results.get(task.id, ()) if r["status"] == "failed"}
         return sorted({p for check in task.payload["contract_plan"]["checks"]
-                       if check["id"] in failed for p in check_paths(check)
-                       if self.repairable_files is None or p in self.repairable_files})
+                       if check["id"] in failed for p in check_repair_paths(check, owned=owned)})
 
 
 class ContractExecutionMixin:
@@ -146,9 +156,8 @@ class ContractExecutionMixin:
                 break
             for path in paths:
                 self.acceptor.sink.delivery.pop(path, None)
-            if task.payload.get("contract_composition"):
-                task = replace(task, payload={**task.payload, "contract_repair_files": paths})
-                self._task_by_id[task_id] = task
+            task = replace(task, payload={**task.payload, "contract_repair_files": paths})
+            self._task_by_id[task_id] = task
             report = run_acceptance(self.acceptor, task, response)
         if report is not None:
             self.acceptor.cached[(task_id, id(response))] = report

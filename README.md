@@ -53,8 +53,9 @@ client restart. Native token usage is left unknown rather than fabricated.
 
 Trusted integration checks can be registered through
 `LegacyDocConfig.external_checkers`, with names explicitly allowed in task input
-`external_checker_names`. Contract checks use `kind: external`, `name`, and owned
-`paths` defining the repair scope. Model output cannot supply shell commands.
+`external_checker_names`. Contract checks use `kind: external`, `name`,
+`read_paths` (owned outputs or registered read-only materials), and `repair_paths`
+(only owned outputs; an empty list forbids repair). Model output cannot supply shell commands.
 An unconfigured or broken checker remains UNVERIFIED. The host decides the actual
 verification program and maps its real result to passed/failed/unverified.
 
@@ -153,3 +154,32 @@ be reused across categories only to the extent of its coverage. Category/ID
 validation cannot infer natural-language meaning or prove arbitrary programs.
 The profile does not generate missing business tests or convert unknown results
 into passes. No automatic paid planning retries are added.
+
+### External reads versus repair permission
+
+```json
+{
+  "id": "public-flow",
+  "kind": "external",
+  "name": "task-acceptance",
+  "read_paths": ["cli.mjs", "public/flow.input.json", "public/flow.expected.json"],
+  "repair_paths": ["cli.mjs"],
+  "requirements": ["R1"]
+}
+```
+
+Provided metadata and samples may be read by acceptance but never assigned as
+model repair targets. Repair feedback contains only the assigned output files;
+both local and composition redelivery reject additional files before writing.
+Local subset repairs still validate the repaired files and recheck all local
+obligations against unchanged files. Composition still rechecks the full plan.
+
+Legacy external `paths` remains supported as the read/relevance list; repair
+permission is inferred as its intersection with the host-owned output set. Thus
+old plans containing registered sample paths work without editing or dropping
+checks, while reference-only checks cannot trigger model repairs. Do not mix
+legacy `paths` with new scope fields. New scope fields must both be present;
+unknown reads, unowned repairs and malformed lists are rejected with the check
+ID, field name and invalid paths. These fields control contract responsibility
+and model repair authorization, not operating-system isolation of a trusted
+host checker, which still receives the workspace directory.
