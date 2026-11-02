@@ -17,12 +17,13 @@ from feasibility_scheduler.statemachine import TaskState
 from feasibility_scheduler.validation import validate_tasks
 
 from .artifact_request import ArtifactMetadataExecutorMixin
+from .contract_runtime import ContractExecutionMixin
 from .graph_rewrite import RewriteCandidate, decide_rewrite
 
 COMPONENT = "rewrite_adapter"
 
 
-class GraphRewriteExecutor(ArtifactMetadataExecutorMixin, Executor):
+class GraphRewriteExecutor(ContractExecutionMixin, ArtifactMetadataExecutorMixin, Executor):
     """policy=rewrite 时使用；fixed 请继续用 PromptFromPayloadExecutor。
 
     额外覆盖 `_prompt`：与 legacy 适配一致，优先 payload["prompt_text"]。

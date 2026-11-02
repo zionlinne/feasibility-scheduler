@@ -81,6 +81,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--max-concurrency", type=int, default=8)
     parser.add_argument("--max-attempts", type=int, default=3)
+    parser.add_argument("--contract-repair-limit", type=int, default=1,
+                        help="每个工作单元按契约验收反例修复的次数上限；0=关闭自动修复")
     parser.add_argument(
         "--model",
         default=None,
@@ -119,6 +121,7 @@ def main(argv: list[str] | None = None) -> int:
         policy=args.policy,
         max_concurrency=args.max_concurrency,
         max_attempts=args.max_attempts,
+        contract_repair_limit=args.contract_repair_limit,
         module_ids=_parse_modules(args.modules),
         model=args.model,
         timeout_seconds=args.timeout_seconds,

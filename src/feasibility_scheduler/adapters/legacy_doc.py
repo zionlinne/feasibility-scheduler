@@ -44,6 +44,7 @@ from feasibility_scheduler.models import Task
 from feasibility_scheduler.store import TaskStore
 from feasibility_scheduler.adapters.acs_text_extract import extract_delivery_map
 from feasibility_scheduler.adapters.artifact_request import ArtifactMetadataExecutorMixin
+from feasibility_scheduler.adapters.contract_runtime import ContractExecutionMixin
 
 
 def _to_plain(value: Any) -> Any:
@@ -101,6 +102,7 @@ class LegacyDocConfig:
     lease_seconds: float = 600.0
     timeout_seconds: float = 300.0
     copy_materials: bool = True
+    contract_repair_limit: int = 1
 
 
 
@@ -221,7 +223,7 @@ class _ArtifactSink:
         }
 
 
-class PromptFromPayloadExecutor(ArtifactMetadataExecutorMixin, Executor):
+class PromptFromPayloadExecutor(ContractExecutionMixin, ArtifactMetadataExecutorMixin, Executor):
     """向后兼容扩展：若 payload 含 prompt_text 则用之，否则走内核默认 JSON dump。"""
 
     def _prompt(self, task_id: str) -> str:
@@ -811,6 +813,8 @@ def _prepare_workdir(cfg: LegacyDocConfig) -> tuple[Path, Path]:
 
 
 def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
+    if not isinstance(cfg.contract_repair_limit, int) or isinstance(cfg.contract_repair_limit, bool) or cfg.contract_repair_limit < 0:
+        raise ValueError("contract_repair_limit must be a nonnegative integer")
     task_input = load_task_input(cfg.task_input_path)
     task_md = Path(cfg.task_md_path).read_text(encoding="utf-8")
     tasks = build_legacy_tasks(
@@ -840,16 +844,26 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
     if plan is None and kind in {"http", "real"}:
         plan = generate_plan(client, tasks, task_md)
     if plan is not None:
+        from feasibility_scheduler.adapters.contract_checks import requirement_ledger
+        if plan.get("version") != 2:
+            raise ValueError("runtime contract enforcement requires version 2; migrate textual contracts to executable checks")
+        if plan.get("requirements") != requirement_ledger(task_md):
+            raise ValueError("contract requirements differ from the original TASK source")
         tasks = attach_plan(tasks, plan)
         (run_dir / "contract.json").write_text(
             json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        from feasibility_scheduler.adapters.contract_runtime import composition_task
+        tasks.append(composition_task(tasks, plan))
         if isinstance(client, _PlaceholderClient):
             client = make_placeholder_client(tasks)
 
     store = TaskStore(run_dir / "state.sqlite3")
     log = EventLog(run_dir / "events.jsonl", run_id=run_dir.name)
     acceptor = legacy_artifact_acceptor(sink=sink, mode=cfg.acceptance)
+    if plan is not None:
+        from feasibility_scheduler.adapters.contract_runtime import ContractAcceptor
+        acceptor = ContractAcceptor(acceptor, sink, run_dir)
 
     # 外部门禁：只登记当前启用的适配验收模式（judge_run 要求全部为真）
     external = {
@@ -880,6 +894,7 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
             executor = GraphRewriteExecutor(tasks, enable_rewrite=True, **exec_kwargs)
         else:
             executor = PromptFromPayloadExecutor(tasks, **exec_kwargs)
+        executor.contract_repair_limit = cfg.contract_repair_limit
         outcome = executor.run()
         rewrite_history = list(getattr(executor, "rewrite_history", []))
     finally:
@@ -898,6 +913,7 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
         "module_ids": [t.id for t in tasks],
         "final_task_ids": list(outcome.states.keys()),
         "rewrite_history": rewrite_history,
+        "contract_check_results": getattr(acceptor, "results", {}),
         "workdir": str(run_dir),
         "workspace": str(workspace),
         "written_files": list(sink.written),

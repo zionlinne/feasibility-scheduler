@@ -18,8 +18,8 @@ def canonical(value: Any) -> str:
 
 def validate_plan(plan: Any, tasks: Sequence[Task]) -> None:
     """Reject incomplete plans before any work is dispatched."""
-    if not isinstance(plan, dict) or plan.get("version") != 1:
-        raise ValueError("contract plan requires version 1")
+    if not isinstance(plan, dict) or plan.get("version") not in (1, 2):
+        raise ValueError("contract plan requires version 1 or 2")
     if plan.get("unresolved") != []:
         raise ValueError("contract plan must explicitly resolve all blocking questions")
     def require_text(obj: Any, keys: Sequence[str]) -> None:
@@ -52,12 +52,15 @@ def validate_plan(plan: Any, tasks: Sequence[Task]) -> None:
         replace(t, dependencies=tuple(sorted(set(t.dependencies) | set(by_id[t.id]["execution_dependencies"]))))
         for t in tasks
     ])
+    if plan["version"] == 2:
+        from .contract_checks import validate_checks
+        validate_checks(plan, tasks)
 
 
 def generate_plan(client: Any, tasks: Sequence[Task], task_md: str) -> dict[str, Any]:
     """Use the configured model once, failing closed on invalid/failed responses."""
     example = {
-        "version": 1,
+        "version": 2,
         "unresolved": [],
         "root": {"precondition": "available inputs", "postcondition": "original success criteria", "verification": "how to verify"},
         "modules": [{"id": t.id, "precondition": "inputs needed to start", "postcondition": "observable deliverable",
@@ -66,10 +69,22 @@ def generate_plan(client: Any, tasks: Sequence[Task], task_md: str) -> dict[str,
         "composition": {"method": "how outputs satisfy root", "consistency": "cross-task obligations",
                         "verification": "who checks composition and how", "counterexample_review": "local passes/global failure cases and mitigations"},
     }
+    from .contract_checks import requirement_ledger
+    example["requirements"] = requirement_ledger(task_md)
+    example["checks"] = [{"id": "root-review", "kind": "manual", "note": "Replace with executable checks where possible",
+                          "requirements": [r["id"] for r in example["requirements"]]}]
+    example["decompositions"] = []
     prompt = (
         "Generate a domain-neutral contract plan as one JSON object with the following shape. "
         "Replace descriptive placeholders with concrete requirements grounded in TASK. "
-        "Keep module IDs and file ownership. Distinguish source requirements from design decisions in handoff. "
+        "Keep initial module IDs. You may propose decompositions as [{parent: module_id, children: "
+        "[{id: unique_id, owned_files: [artifact_path], postcondition: concrete_deliverable}]}], "
+        "partitioning the parent's artifacts exactly, including non-code artifacts. "
+        "Copy requirements unchanged. Every requirement must reference at least one check via checks[].requirements. "
+        "Checks support file_exists(path), text_contains(path,value), json_equals(path,key,value), "
+        "json_match(path,key,other_path,other_key), and manual(note). key/other_key are lists of object keys. "
+        "Use manual for obligations these checks cannot establish; manual remains UNVERIFIED. "
+        "Distinguish source requirements from design decisions in handoff. "
         "Only execution_dependencies require actual upstream artifacts before starting. "
         "Interface dependencies can run in parallel using shared agreed representations. "
         "Preserve all root requirements, define composition checks and review cases where all local "
@@ -87,6 +102,8 @@ def generate_plan(client: Any, tasks: Sequence[Task], task_md: str) -> dict[str,
         raise ValueError(f"contract planning failed: {response.outcome}")
     plan = json.loads(response.raw_body)
     validate_plan(plan, tasks)
+    if plan.get("requirements") != example["requirements"]:
+        raise ValueError("planner changed the immutable source requirement ledger")
     return plan
 
 
@@ -100,5 +117,34 @@ def attach_plan(tasks: Sequence[Task], plan: dict[str, Any]) -> list[Task]:
         payload = dict(task.payload)
         payload.update(contract_plan=plan, contract_hash=digest, contract_module_ids=[task.id], deps=list(deps))
         payload["prompt_text"] = str(payload.get("prompt_text", "")) + "\nSHARED CONTRACT " + digest + "\n" + canonical(plan)
-        attached.append(replace(task, dependencies=deps, payload=payload))
+        attached.append(refresh_contract(replace(task, dependencies=deps, payload=payload)))
     return attached
+
+
+def refresh_contract(task: Task) -> Task:
+    """Project obligations onto the current work unit after a split or merge."""
+    plan = task.payload.get("contract_plan")
+    if not plan or plan.get("version") != 2 or task.payload.get("contract_composition"):
+        return task
+    from .contract_checks import check_paths
+    payload = dict(task.payload)
+    owned = set(payload.get("owned_files", ()))
+    local, deferred = [], []
+    for check in plan["checks"]:
+        paths = check_paths(check)
+        if paths and paths <= owned:
+            local.append(check["id"])
+        elif paths & owned:
+            deferred.append(check["id"])
+    unit = {"task_id": task.id, "owned_files": sorted(owned), "dependencies": list(task.dependencies),
+            "local_checks": local, "composition_checks": deferred,
+            "deliverable": payload.get("title"),
+            "requirements": sorted({r for check in plan["checks"] if check["id"] in local + deferred
+                                    for r in check["requirements"]}),
+            "root_contract_hash": payload["contract_hash"]}
+    payload["execution_contract"] = unit
+    payload["execution_contract_hash"] = "sha256:" + hashlib.sha256(canonical(unit).encode()).hexdigest()
+    # Replace the previous projection, retaining the immutable shared contract.
+    base = str(payload.get("prompt_text", "")).split("\nCURRENT EXECUTION CONTRACT\n", 1)[0]
+    payload["prompt_text"] = base + "\nCURRENT EXECUTION CONTRACT\n" + canonical(unit)
+    return replace(task, payload=payload)

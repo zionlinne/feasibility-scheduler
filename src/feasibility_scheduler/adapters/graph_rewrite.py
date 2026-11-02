@@ -174,7 +174,8 @@ def _validate_or_none(tasks: Sequence[Task]) -> tuple[Task, ...] | None:
             if key in seen:
                 return None
             seen.add(key)
-    return tuple(tasks)
+    from .contract_plan import refresh_contract
+    return tuple(refresh_contract(task) for task in tasks)
 
 
 def _cover_files(tasks: Sequence[Task]) -> set[str]:
@@ -418,6 +419,25 @@ def generate_candidates(
     mutable_tasks = [by_id[i] for i in sorted(mutable) if i in by_id]
 
     serial = 0
+    for task in mutable_tasks:
+        plan = task.payload.get("contract_plan", {})
+        for proposal in plan.get("decompositions", ()):
+            if proposal["parent"] != task.id:
+                continue
+            children = [_clone_task(task, new_id=child["id"], owned_files=child["owned_files"],
+                                    title=child["postcondition"], estimated_tokens=max(1, _tokens(task) // len(proposal["children"])))
+                        for child in proposal["children"]]
+            if any(child.id in by_id for child in children):
+                continue
+            rebuilt = _retarget_deps([t for t in task_list if t.id != task.id] + children,
+                                     mapping={task.id: tuple(c.id for c in children)})
+            after = _validate_or_none(rebuilt)
+            if after is not None and _cover_files(after) == _cover_files(task_list):
+                candidates.append(RewriteCandidate(
+                    candidate_id=f"contract-split:{task.id}", kind="split",
+                    reason="按契约提议的交付物边界拆分并重新投影检查责任", score=float(len(children)),
+                    tasks=after, removed_ids=(task.id,), added_ids=tuple(c.id for c in children),
+                    details={"source": "contract_plan"}))
     # merge：轻量 + 文件不交叠
     for i, left in enumerate(mutable_tasks):
         for right in mutable_tasks[i + 1 :]:

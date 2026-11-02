@@ -7,12 +7,15 @@ from feasibility_scheduler.adapters.graph_rewrite import generate_candidates
 from feasibility_scheduler.adapters.legacy_doc import LegacyDocConfig, run_legacy_doc
 from feasibility_scheduler.fake_client import FakeClient, Step
 from feasibility_scheduler.models import Task
+from feasibility_scheduler.adapters.contract_checks import requirement_ledger
 
 
 def fixture():
-    tasks = [Task(id="a", payload={"owned_files": ["a.py", "b.py"]}),
-             Task(id="b", payload={"owned_files": ["c.py"]})]
-    plan = {"version": 1, "unresolved": [],
+    tasks = [Task(id="a", payload={"owned_files": ["a.py", "b.py"]}, output_contract={"type": "object"}, constraints_declared=True),
+             Task(id="b", payload={"owned_files": ["c.py"]}, output_contract={"type": "object"}, constraints_declared=True)]
+    plan = {"version": 2, "unresolved": [], "requirements": requirement_ledger("Compare offers"),
+            "checks": [{"id": path, "kind": "file_exists", "path": path, "requirements": ["R1"]}
+                       for path in ("a.py", "b.py", "c.py")], "decompositions": [],
             "root": {"precondition": "three offers", "postcondition": "lowest eligible cost", "verification": "recalculate"},
             "modules": [{"id": t.id, "precondition": "shared cost period", "postcondition": "normalized cost",
                          "verification": "check source", "handoff": "three year total",
@@ -49,12 +52,16 @@ def test_invalid_plan_blocks_dispatch(fault):
 def test_rewrite_preserves_shared_contract_and_module_coverage():
     tasks, plan = fixture()
     attached = attach_plan(tasks, plan)
-    for candidate in generate_candidates(attached, states={}):
+    candidates = generate_candidates(attached, states={})
+    assert {c.kind for c in candidates} == {"keep", "split", "merge"}
+    for candidate in candidates:
         covered = set()
         for task in candidate.tasks:
             assert task.payload["contract_hash"] == attached[0].payload["contract_hash"]
             assert task.payload["contract_plan"] == plan
             assert "SHARED CONTRACT" in task.payload["prompt_text"]
+            assert task.payload["execution_contract"]["task_id"] == task.id
+            assert task.payload["execution_contract"]["owned_files"] == sorted(task.payload["owned_files"])
             covered.update(task.payload["contract_module_ids"])
         assert covered == {"a", "b"}
 
