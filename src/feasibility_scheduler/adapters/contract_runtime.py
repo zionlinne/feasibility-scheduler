@@ -23,14 +23,16 @@ def composition_task(tasks: list[Task], plan: dict[str, Any]) -> Task:
     return Task(id=tid, dependencies=tuple(t.id for t in tasks), constraints_declared=True,
                 output_contract={"type": "object", "required": ["ok"]},
                 payload={"contract_plan": plan, "contract_composition": True, "owned_files": [],
-                         "prompt_text": "Evaluate the immutable root contract against all delivered artifacts."})
+                         "prompt_text": "Evaluate the immutable root contract against all delivered artifacts.\nREAD-ONLY MATERIALS\n"
+                         + json.dumps(tasks[0].payload.get("reference_files", {}), ensure_ascii=False)})
 
 
 class ContractAcceptor:
-    def __init__(self, base: Any, sink: Any, audit_dir: Path) -> None:
+    def __init__(self, base: Any, sink: Any, audit_dir: Path, *, repairable_files: set[str] | None = None) -> None:
         self.base = base
         self.sink = sink
         self.audit_dir = audit_dir
+        self.repairable_files = repairable_files
         self.cached: dict[tuple[str, int], AcceptanceReport] = {}
         self.results: dict[str, list[dict[str, Any]]] = {}
         self.serial = max((int(p.stem.rsplit("-", 1)[1])
@@ -79,7 +81,8 @@ class ContractAcceptor:
             return sorted(task.payload.get("owned_files", ()))
         failed = {r["id"] for r in self.results.get(task.id, ()) if r["status"] == "failed"}
         return sorted({p for check in task.payload["contract_plan"]["checks"]
-                       if check["id"] in failed for p in check_paths(check)})
+                       if check["id"] in failed for p in check_paths(check)
+                       if self.repairable_files is None or p in self.repairable_files})
 
 
 class ContractExecutionMixin:

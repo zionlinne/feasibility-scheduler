@@ -36,13 +36,16 @@ def validate_checks(plan: dict[str, Any], tasks: Sequence[Task]) -> None:
     if not isinstance(checks, list) or not checks:
         raise ValueError("executable or explicitly manual checks are required")
     owned = [p for task in tasks for p in task.payload.get("owned_files", ())]
-    for path in owned:
+    references = {p for task in tasks for p in task.payload.get("reference_files", {})}
+    for path in list(owned) + list(references):
         if (not isinstance(path, str) or not path or "\\" in path or ":" in path
                 or PurePosixPath(path).is_absolute() or ".." in PurePosixPath(path).parts
                 or str(PurePosixPath(path)) != path):
             raise ValueError("artifact paths must be canonical relative paths")
     if len(owned) != len(set(owned)):
         raise ValueError("artifact ownership overlaps")
+    if references & set(owned):
+        raise ValueError("reference material cannot be owned by a worker")
     seen, covered = set(), set()
     for check in checks:
         if not isinstance(check, dict) or not isinstance(check.get("id"), str) or not check["id"] or check["id"] in seen:
@@ -61,7 +64,7 @@ def validate_checks(plan: dict[str, Any], tasks: Sequence[Task]) -> None:
             continue
         for key in (("path", "other_path") if kind == "json_match" else ("path",)):
             path = check.get(key)
-            if (not isinstance(path, str) or path not in owned or "\\" in path
+            if (not isinstance(path, str) or path not in set(owned) | references or "\\" in path
                     or PurePosixPath(path).is_absolute() or ".." in PurePosixPath(path).parts
                     or ":" in path):
                 raise ValueError("check path must be an owned relative artifact")

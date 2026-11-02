@@ -395,6 +395,9 @@ def build_legacy_tasks(
     module_ids: Iterable[str] | None = None,
 ) -> list[Task]:
     modules = list(task_input["modules"])
+    references = task_input.get("reference_files", {})
+    if not isinstance(references, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in references.items()):
+        raise ValueError("reference_files must map relative artifact paths to text contents")
     wanted = set(module_ids) if module_ids is not None else None
     if wanted is not None:
         missing = wanted - {m.get("module_id") for m in modules}
@@ -425,6 +428,8 @@ def build_legacy_tasks(
             module=m,
             sibling_files=[p for p in all_owned if p not in owned],
         )
+        if references:
+            prompt += "\nREAD-ONLY PROVIDED MATERIALS (do not overwrite)\n" + json.dumps(references, ensure_ascii=False)
         payload = {
             "module_id": mid,
             "title": m.get("title"),
@@ -434,6 +439,7 @@ def build_legacy_tasks(
             "deps": list(deps),
             "estimated_tokens": m.get("estimated_tokens"),
             "prompt_text": prompt,
+            "reference_files": references,
         }
         tasks.append(
             Task(
@@ -822,6 +828,14 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
     )
     run_dir, workspace = _prepare_workdir(cfg)
     sink = _ArtifactSink(workspace)
+    references = task_input.get("reference_files", {})
+    owned = {p for task in tasks for p in task.payload.get("owned_files", ())}
+    for path, content in references.items():
+        target = sink._safe_target(path)
+        if target is None or path in owned:
+            raise ValueError("reference material path must be safe and disjoint from output ownership")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
 
     kind = cfg.client_kind.strip().lower()
     if kind in {"", "fake"}:
@@ -863,7 +877,7 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
     acceptor = legacy_artifact_acceptor(sink=sink, mode=cfg.acceptance)
     if plan is not None:
         from feasibility_scheduler.adapters.contract_runtime import ContractAcceptor
-        acceptor = ContractAcceptor(acceptor, sink, run_dir)
+        acceptor = ContractAcceptor(acceptor, sink, run_dir, repairable_files=owned)
 
     # 外部门禁：只登记当前启用的适配验收模式（judge_run 要求全部为真）
     external = {

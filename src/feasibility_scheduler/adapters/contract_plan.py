@@ -104,6 +104,8 @@ def generate_plan(client: Any, tasks: Sequence[Task], task_md: str) -> dict[str,
         + canonical(example) + "\nTASK\n" + task_md + "\nMODULES\n"
         + canonical([{"id": t.id, "owned_files": list(t.payload.get("owned_files", ())),
                       "title": t.payload.get("title"), "outputs": list(t.payload.get("outputs", ()))} for t in tasks])
+        + "\nREAD-ONLY PROVIDED MATERIALS (may be checked; never assign ownership or modify)\n"
+        + canonical(dict(tasks[0].payload.get("reference_files", {})) if tasks else {})
     )
     digest = hashlib.sha256(prompt.encode()).hexdigest()
     response = client.call(ApiRequest(

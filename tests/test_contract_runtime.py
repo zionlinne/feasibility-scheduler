@@ -189,3 +189,25 @@ def test_whole_json_object_check_rejects_extra_keys(tmp_path):
     assert evaluate_checks(plan, tmp_path)[0]["status"] == "passed"
     target.write_text('{"total":1200,"unexpected":true}', encoding="utf-8")
     assert evaluate_checks(plan, tmp_path)[0]["status"] == "failed"
+
+
+def test_provided_reference_can_be_checked_but_never_repaired(tmp_path, monkeypatch):
+    _, plan, data, cfg = setup_task(tmp_path)
+    data["reference_files"] = {"package.json": '{"type":"module"}'}
+    plan["checks"].append({"id": "reference", "kind": "json_equals", "path": "package.json",
+                           "key": [], "value": {"type": "commonjs"}, "requirements": ["R1"]})
+    cfg.task_input_path.write_text(json.dumps(data), encoding="utf-8")
+    client = FakeClient([step({"a.json": '{"total":1}'}), step({"b.json": '{"total":1}'})])
+    monkeypatch.setattr("feasibility_scheduler.adapters.legacy_doc.create_client", lambda *a, **k: client)
+    outcome = run_legacy_doc(cfg)
+    assert not outcome.ok
+    assert (cfg.workdir / "workspace/package.json").read_text(encoding="utf-8") == '{"type":"module"}'
+    assert not list(cfg.workdir.glob("contract-repair-*.json"))
+
+
+def test_reference_ownership_overlap_is_rejected(tmp_path):
+    _, _, data, cfg = setup_task(tmp_path)
+    data["reference_files"] = {"a.json": "{}"}
+    cfg.task_input_path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="disjoint"):
+        run_legacy_doc(replace(cfg, client_kind="fake"))
