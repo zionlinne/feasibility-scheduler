@@ -501,6 +501,8 @@ class HttpClient:
 
     def _fetch_format_repair(self, request: ApiRequest, prompt: str) -> RepairText | None:
         """恰好一次格式修复请求。取回正文前先落 Raw；失败则停止，不再请求。"""
+        if request.metadata.get("allow_format_repair") is False:
+            return None
         self.repair_prompts.append(prompt)
         repair_request = ApiRequest(
             task_id=request.task_id,

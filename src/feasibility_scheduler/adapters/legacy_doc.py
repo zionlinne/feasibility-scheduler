@@ -108,6 +108,7 @@ class LegacyDocConfig:
     external_checkers: Mapping[str, Any] | None = None
     acceptance_script: Path | None = None
     acceptance_profile: Mapping[str, Any] | None = None
+    integration_files: tuple[str, ...] | None = None
 
 
 
@@ -824,6 +825,12 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
     tasks = build_legacy_tasks(
         task_input, task_md=task_md, module_ids=cfg.module_ids
     )
+    integration_files = cfg.integration_files if cfg.integration_files is not None else task_input.get("integration_files")
+    if integration_files is not None:
+        from .integration import integration_task
+        integration_task(tasks, {}, integration_files)  # Host scope preflight before any model request.
+        if cfg.client_kind.strip().lower() in {"", "fake"}:
+            raise ValueError("integration requires a real or native client, not placeholder artifacts")
     run_dir, workspace = _prepare_workdir(cfg)
     from .acceptance_profile import validate_profile, validate_responsibilities, bind_profile
     if profile is not None:
@@ -900,7 +907,12 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
             json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         from feasibility_scheduler.adapters.contract_runtime import composition_task
-        tasks.append(composition_task(tasks, plan))
+        root = composition_task(tasks, plan)
+        if integration_files is not None:
+            tasks.append(integration_task(tasks, plan, integration_files))
+            root = replace(root, dependencies=root.dependencies + (tasks[-1].id,),
+                           payload={**root.payload, "integration_required": True})
+        tasks.append(root)
         if isinstance(client, _PlaceholderClient):
             client = make_placeholder_client(tasks)
 

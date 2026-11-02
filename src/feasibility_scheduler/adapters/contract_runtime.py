@@ -10,8 +10,9 @@ from pathlib import Path
 from typing import Any
 
 from feasibility_scheduler.acceptance import AcceptanceReport, run_acceptance
-from feasibility_scheduler.fake_client import ApiRequest, FakeClient, Step
+from feasibility_scheduler.fake_client import ApiRequest, FakeClient, Step, Outcome
 from feasibility_scheduler.models import Task
+from feasibility_scheduler.statemachine import TaskState
 
 from .contract_checks import check_paths, check_repair_paths, evaluate_checks
 from .workspace_validation import workspace_file_checks
@@ -52,6 +53,23 @@ class ContractAcceptor:
         plan = task.payload.get("contract_plan")
         if not plan or plan.get("version") != 2:
             return self.base(task, response)
+        if task.payload.get("contract_integration"):
+            allowed = set(task.payload["integration_files"])
+            body = response.parsed_body
+            files = body.get("files") if isinstance(body, Mapping) else None
+            if (not response.ok or not isinstance(body, Mapping) or body.get("ok") is not True
+                    or set(body) - {"ok", "files"} or not isinstance(files, Mapping) or set(files) != allowed
+                    or any(not isinstance(v, str) for v in files.values())):
+                return AcceptanceReport(task.id, False, errors=("integration must deliver exactly the authorized artifacts",))
+            # Validate the whole envelope before invalidating any accepted delivery.
+            for path in allowed:
+                if self.sink._safe_target(path) is None:
+                    return AcceptanceReport(task.id, False, errors=("unsafe integration path",))
+            for path in allowed:
+                self.sink.delivery.pop(path, None)
+            delivery_task = replace(task, payload={**task.payload, "owned_files": sorted(allowed), "outputs": sorted(allowed)})
+            # Delivery/syntax acceptance only. The root independently rechecks every predicate.
+            return self.base(delivery_task, response)
         allowed = set(task.payload.get("contract_repair_files", ()))
         if allowed:
             body = response.parsed_body
@@ -132,6 +150,29 @@ class ContractExecutionMixin:
 
     async def _send(self, task_id: str, key: str) -> Any:
         task = self._task_by_id[task_id]
+        if task.payload.get("contract_integration"):
+            from .integration import integration_context
+            try:
+                context, prompt = integration_context(task, self.acceptor.sink.workspace)
+            except (OSError, ValueError, UnicodeError) as exc:
+                # Do not spend a request when actual producer context is unavailable.
+                self._record("api_request_failed", task_id, "集成输入不可读", details={"error": str(exc)})
+                return FakeClient([Step.invalid_json()]).call(ApiRequest(
+                    task_id=task_id, idempotency_key=key, prompt="unavailable integration context", provider="local-context-check"))
+            (self.acceptor.audit_dir / "integration-context.json").write_text(
+                json.dumps(context, ensure_ascii=False, indent=2), encoding="utf-8")
+            request = ApiRequest(task_id=task_id, idempotency_key=key, prompt=prompt,
+                                 model=self.client.model, provider=self.client.provider,
+                                 metadata={"artifact_delivery": True, "owned_files": task.payload["integration_files"],
+                                           "allow_format_repair": False})
+            if self.before_send is not None:
+                await self.before_send(request)
+            response = await self.client.acall(request)
+            if self.after_send is not None:
+                await self.after_send(request)
+            self._record("api_response_received" if response.ok else "api_request_failed", task_id,
+                         "集成阶段单次响应", details=response.to_audit_dict())
+            return response
         if task.payload.get("contract_composition"):
             # Root validation is a local deterministic action, not another model opinion.
             response = FakeClient([Step.success()]).call(ApiRequest(
@@ -141,6 +182,14 @@ class ContractExecutionMixin:
             return response
         return await super()._send(task_id, key)
 
+    async def _handle_response(self, task_id: str, response: Any) -> bool:
+        if self._task_by_id[task_id].payload.get("contract_integration") and not response.ok:
+            state = TaskState.RECOVERY_REQUIRED if response.outcome is Outcome.TIMEOUT else TaskState.FAILED
+            await self._step(task_id, state, "api_request_failed", "集成请求未成功，不自动重发",
+                             details=response.to_audit_dict())
+            return True
+        return await super()._handle_response(task_id, response)
+
     async def _accept(self, task_id: str, response: Any) -> None:
         task = self._task_by_id[task_id]
         if not isinstance(self.acceptor, ContractAcceptor) or task.payload.get("contract_plan", {}).get("version") != 2:
@@ -148,7 +197,8 @@ class ContractExecutionMixin:
         report = run_acceptance(self.acceptor, task, response)
         previous = sum(e.type == "candidate_selected" and e.component == "contract_adapter"
                        and e.task_id == task_id for e in self.log.events())
-        for revision in range(previous + 1, self.contract_repair_limit + 1):
+        limit = 0 if task.payload.get("contract_integration") or task.payload.get("integration_required") else self.contract_repair_limit
+        for revision in range(previous + 1, limit + 1):
             if report is None or report.passed or report.error or not response.ok:
                 break
             paths = self.acceptor.repair_files(task)
