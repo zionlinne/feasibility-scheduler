@@ -103,6 +103,8 @@ class LegacyDocConfig:
     timeout_seconds: float = 300.0
     copy_materials: bool = True
     contract_repair_limit: int = 1
+    native_bridge_dir: Path | None = None
+    external_checkers: Mapping[str, Any] | None = None
 
 
 
@@ -440,6 +442,7 @@ def build_legacy_tasks(
             "estimated_tokens": m.get("estimated_tokens"),
             "prompt_text": prompt,
             "reference_files": references,
+            "external_checker_names": list(task_input.get("external_checker_names", [])),
         }
         tasks.append(
             Task(
@@ -848,6 +851,9 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
         if cfg.model:
             kwargs["model"] = cfg.model
         client = create_client("http", **kwargs)
+    elif kind == "native":
+        client = create_client("native", bridge_dir=cfg.native_bridge_dir or run_dir / "native-bridge",
+                               timeout_seconds=cfg.timeout_seconds)
     else:
         raise ValueError(f"未知 client: {cfg.client_kind!r}")
 
@@ -855,7 +861,7 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
     from feasibility_scheduler.adapters.contract_plan import attach_plan, generate_plan
 
     plan = task_input.get("contract_plan")
-    if plan is None and kind in {"http", "real"}:
+    if plan is None and kind in {"http", "real", "native"}:
         plan = generate_plan(client, tasks, task_md)
     if plan is not None:
         from feasibility_scheduler.adapters.contract_checks import requirement_ledger
@@ -877,7 +883,8 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
     acceptor = legacy_artifact_acceptor(sink=sink, mode=cfg.acceptance)
     if plan is not None:
         from feasibility_scheduler.adapters.contract_runtime import ContractAcceptor
-        acceptor = ContractAcceptor(acceptor, sink, run_dir, repairable_files=owned)
+        acceptor = ContractAcceptor(acceptor, sink, run_dir, repairable_files=owned,
+                                    external_checkers=cfg.external_checkers)
 
     # 外部门禁：只登记当前启用的适配验收模式（judge_run 要求全部为真）
     external = {

@@ -28,11 +28,13 @@ def composition_task(tasks: list[Task], plan: dict[str, Any]) -> Task:
 
 
 class ContractAcceptor:
-    def __init__(self, base: Any, sink: Any, audit_dir: Path, *, repairable_files: set[str] | None = None) -> None:
+    def __init__(self, base: Any, sink: Any, audit_dir: Path, *, repairable_files: set[str] | None = None,
+                 external_checkers=None) -> None:
         self.base = base
         self.sink = sink
         self.audit_dir = audit_dir
         self.repairable_files = repairable_files
+        self.external_checkers = external_checkers
         self.cached: dict[tuple[str, int], AcceptanceReport] = {}
         self.results: dict[str, list[dict[str, Any]]] = {}
         self.serial = max((int(p.stem.rsplit("-", 1)[1])
@@ -64,7 +66,7 @@ class ContractAcceptor:
             if not base_report.passed or base_report.error:
                 return base_report
             ids = set(task.payload["execution_contract"]["local_checks"])
-        results = evaluate_checks(plan, self.sink.workspace, ids=ids)
+        results = evaluate_checks(plan, self.sink.workspace, ids=ids, external_checkers=self.external_checkers)
         self.results[task.id] = results
         self.serial += 1
         (self.audit_dir / f"contract-checks-{self.serial}.json").write_text(

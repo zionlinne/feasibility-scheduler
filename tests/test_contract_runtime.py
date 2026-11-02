@@ -211,3 +211,19 @@ def test_reference_ownership_overlap_is_rejected(tmp_path):
     cfg.task_input_path.write_text(json.dumps(data), encoding="utf-8")
     with pytest.raises(ValueError, match="disjoint"):
         run_legacy_doc(replace(cfg, client_kind="fake"))
+
+
+def test_external_checker_requires_trusted_registration(tmp_path):
+    tasks, plan, _, _ = setup_task(tmp_path)
+    plan["checks"].append({"id": "suite", "kind": "external", "name": "registered-suite",
+                           "paths": ["a.json", "b.json"], "requirements": ["R1"]})
+    with pytest.raises(ValueError, match="trusted checker"):
+        validate_plan(plan, tasks)
+    tasks = [replace(t, payload={**t.payload, "external_checker_names": ["registered-suite"]}) for t in tasks]
+    validate_plan(plan, tasks)
+    result = evaluate_checks(plan, tmp_path, ids={"suite"})[0]
+    assert result["status"] == "unverified"
+    calls = []
+    result = evaluate_checks(plan, tmp_path, ids={"suite"}, external_checkers={
+        "registered-suite": lambda path: calls.append(path) or {"status": "failed", "detail": "real verifier found mismatch"}})[0]
+    assert calls == [tmp_path] and result["status"] == "failed"

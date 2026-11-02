@@ -106,6 +106,14 @@ def generate_plan(client: Any, tasks: Sequence[Task], task_md: str) -> dict[str,
                       "title": t.payload.get("title"), "outputs": list(t.payload.get("outputs", ()))} for t in tasks])
         + "\nREAD-ONLY PROVIDED MATERIALS (may be checked; never assign ownership or modify)\n"
         + canonical(dict(tasks[0].payload.get("reference_files", {})) if tasks else {})
+        + "\nTRUSTED EXTERNAL CHECKER NAMES\n"
+        + canonical(list(tasks[0].payload.get("external_checker_names", [])) if tasks else [])
+        + '\nWhen applicable, use {"id":"integration","kind":"external","name":"trusted-name",'
+          '"paths":["owned/output/path"],"requirements":["R1"]} to execute the registered checker. '
+          'Only registered names are valid; no shell commands can be supplied by the model. '
+          'A complete supplied black-box suite can discharge requirements it tests; retain manual obligations '
+          'for requirements outside its coverage. Include concrete shared function signatures and state shape '
+          'in an additional shared_interfaces object and module handoff so workers can implement in parallel.'
     )
     digest = hashlib.sha256(prompt.encode()).hexdigest()
     response = client.call(ApiRequest(

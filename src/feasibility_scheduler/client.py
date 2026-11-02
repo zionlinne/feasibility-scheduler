@@ -68,6 +68,9 @@ def create_client(
         from .http_client import HttpClient
 
         return HttpClient(**kwargs)
+    if selected == "native":
+        from .native_client import NativeClient
+        return NativeClient(**kwargs)
     raise ValueError(
         f"未知 FEASIBILITY_CLIENT={selected!r}，期望 fake|http"
     )

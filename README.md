@@ -39,3 +39,20 @@ Targeted offline validation uses
 The executable checker vocabulary is deliberately limited. It does not establish
 general semantic correctness of natural-language contracts or support concurrent
 writers to the same artifact.
+
+## Native agent execution
+
+`--client native --native-bridge-dir <directory>` uses filesystem rendezvous.
+The host must dispatch its native agents for each `.request.json` and atomically
+publish the matching `.response.json` containing `status`, `producer`, and `body`.
+The scheduler retains dispatch, dependency, split/merge, acceptance, and trace
+ownership. This transport opens no network connection and does not launch models
+itself. Pending requests are UNKNOWN after a timeout; response lookup survives a
+client restart. Native token usage is left unknown rather than fabricated.
+
+Trusted integration checks can be registered through
+`LegacyDocConfig.external_checkers`, with names explicitly allowed in task input
+`external_checker_names`. Contract checks use `kind: external`, `name`, and owned
+`paths` defining the repair scope. Model output cannot supply shell commands.
+An unconfigured or broken checker remains UNVERIFIED. The host decides the actual
+verification program and maps its real result to passed/failed/unverified.

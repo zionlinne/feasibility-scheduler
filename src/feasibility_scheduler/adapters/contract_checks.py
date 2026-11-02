@@ -17,7 +17,10 @@ def requirement_ledger(task_md: str) -> list[dict[str, str]]:
 
 
 def check_paths(check: dict[str, Any]) -> set[str]:
-    return {check[key] for key in ("path", "other_path") if isinstance(check.get(key), str)}
+    paths = {check[key] for key in ("path", "other_path") if isinstance(check.get(key), str)}
+    if check.get("kind") == "external":
+        paths.update(check.get("paths", []))
+    return paths
 
 
 def validate_checks(plan: dict[str, Any], tasks: Sequence[Task]) -> None:
@@ -56,8 +59,16 @@ def validate_checks(plan: dict[str, Any], tasks: Sequence[Task]) -> None:
             raise ValueError("check must reference known source requirements")
         covered.update(refs)
         kind = check.get("kind")
-        if not isinstance(kind, str) or kind not in {"file_exists", "text_contains", "json_equals", "json_match", "manual"}:
+        if not isinstance(kind, str) or kind not in {"file_exists", "text_contains", "json_equals", "json_match", "manual", "external"}:
             raise ValueError("unsupported check kind")
+        if kind == "external":
+            names = {name for task in tasks for name in task.payload.get("external_checker_names", [])}
+            paths = check.get("paths")
+            if (not isinstance(check.get("name"), str) or check["name"] not in names
+                    or not isinstance(paths, list) or not paths
+                    or any(not isinstance(p, str) or p not in owned for p in paths)):
+                raise ValueError("external check must name a trusted checker and owned repair scope")
+            continue
         if kind == "manual":
             if not isinstance(check.get("note"), str) or not check["note"].strip():
                 raise ValueError("manual checks require review instructions")
@@ -101,13 +112,26 @@ def validate_checks(plan: dict[str, Any], tasks: Sequence[Task]) -> None:
             raise ValueError("decomposition must preserve artifact ownership exactly")
 
 
-def evaluate_checks(plan: dict[str, Any], workspace: Path, *, ids: set[str] | None = None) -> list[dict[str, Any]]:
+def evaluate_checks(plan: dict[str, Any], workspace: Path, *, ids: set[str] | None = None,
+                    external_checkers=None) -> list[dict[str, Any]]:
     results = []
     for check in plan["checks"]:
         if ids is not None and check["id"] not in ids:
             continue
         result = {"id": check["id"], "requirements": check["requirements"], "status": "unverified", "detail": ""}
-        if check["kind"] == "manual":
+        if check["kind"] == "external":
+            checker = (external_checkers or {}).get(check["name"])
+            if checker is None:
+                result["detail"] = "trusted checker is not configured"
+            else:
+                try:
+                    checked = checker(workspace)
+                    if checked.get("status") not in {"passed", "failed", "unverified"}:
+                        raise ValueError("invalid external checker result")
+                    result.update(status=checked["status"], detail=checked.get("detail", ""))
+                except Exception as exc:
+                    result["detail"] = f"external checker error: {type(exc).__name__}: {exc}"
+        elif check["kind"] == "manual":
             result["detail"] = check["note"]
         else:
             try:
