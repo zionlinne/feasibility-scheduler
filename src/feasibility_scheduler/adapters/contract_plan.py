@@ -248,7 +248,7 @@ def attach_plan(tasks: Sequence[Task], plan: dict[str, Any]) -> list[Task]:
 def refresh_contract(task: Task) -> Task:
     """Project obligations onto the current work unit after a split or merge."""
     plan = task.payload.get("contract_plan")
-    if not plan or plan.get("version") != 2 or task.payload.get("contract_composition"):
+    if not plan or plan.get("version") != 2 or task.payload.get("contract_composition") or task.payload.get("contract_integration"):
         return task
     from .contract_checks import check_paths
     from .acceptance_profile import deferred_checks, project_responsibilities

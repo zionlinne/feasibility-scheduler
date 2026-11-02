@@ -96,7 +96,7 @@ def _mutable_ids(
     out: set[str] = set()
     for task in tasks:
         st = states.get(task.id, "PENDING")
-        if st not in frozen:
+        if st not in frozen and not task.payload.get("contract_integration"):
             out.add(task.id)
     return out
 

@@ -255,3 +255,37 @@ branch was tested. The business suite remains mandatory. This automatic witness
 is Node-specific; other runtimes require their own trusted acceptance adapters.
 Host-owned test/helper files that the selected suite never executes will also be
 reported as missing evidence; choose the ownership/verification scope accordingly.
+
+### Explicit integration stage before root acceptance
+
+Set host `integration_files` in TASK_INPUT (an array), or pass
+`--integration-files src/runtime.mjs,src/cli.mjs` to authorize a sequential
+`__contract_integration__` task. Paths must be unique canonical paths already
+owned by the selected producers; references cannot be edited. This opt-in stage
+requires a real/native client and an executable v2 contract. It does not change
+the default workflow or automatically grant the planner broader write access.
+
+The integration task waits for all producers to be ACCEPTED, including replacement
+children introduced by graph rewrites. At dispatch it reads the actual delivered
+outputs and reference materials, with hashes recorded in `integration-context.json`.
+The configured worker receives current editable sources, read-only peer sources,
+and the immutable contract. Its job is to connect existing interfaces through the
+authorized files, preserving peer implementations rather than duplicating them.
+Only the complete contents of the authorized files may be returned. Integration
+has no duplicate ownership and cannot itself be split or merged by the scheduler.
+
+The stage makes one worker request: no transport retry, format-repair request or
+contract-repair request. TIMEOUT requires recovery; other unsuccessful responses
+fail the stage. An unavailable source prevents the request. Delivery or configured
+syntax acceptance alone does not prove integration correctness: the root waits
+for this stage and independently rechecks all original predicates and trusted
+business/execution checks. Root failure is reported without another model repair
+when this stage is enabled. A failed candidate may remain in the authorized
+workspace for inspection; accepted producer history describes the earlier version,
+and the integration delivery hashes identify the replacement version.
+
+This provides an automatic place for integration work, not a guarantee that a
+model will produce a correct integration. Keep the edit scope small enough for
+the worker's output budget; existing peer implementations stay read-only. The
+lightweight regression uses scripted workers and one real Node entrypoint check;
+it does not demonstrate paid-provider reliability or re-run the original full task.

@@ -84,6 +84,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--contract-repair-limit", type=int, default=1,
                         help="每个工作单元按契约验收反例修复的次数上限；0=关闭自动修复")
+    parser.add_argument("--integration-files", default=None,
+                        help="启用单次集成阶段，逗号分隔允许接线修改的现有输出路径；其他模块只读")
     parser.add_argument("--native-bridge-dir", type=Path, default=None,
                         help="native 模式的原生 Agent 请求/响应目录，由宿主调度 Agent 处理")
     parser.add_argument("--acceptance-script", type=Path, default=None,
@@ -137,6 +139,7 @@ def main(argv: list[str] | None = None) -> int:
         max_concurrency=args.max_concurrency,
         max_attempts=args.max_attempts,
         contract_repair_limit=args.contract_repair_limit,
+        integration_files=tuple(args.integration_files.split(",")) if args.integration_files is not None else None,
         native_bridge_dir=args.native_bridge_dir,
         acceptance_script=args.acceptance_script,
         acceptance_profile=profile,
