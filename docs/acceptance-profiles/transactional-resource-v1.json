@@ -1,0 +1,145 @@
+{
+  "id": "transactional-resource-v1",
+  "categories": [
+    {
+      "id": "requirements",
+      "description": "Original requirements have acceptance evidence",
+      "applicable": true,
+      "allowed_kinds": [
+        "external",
+        "file_exists",
+        "text_contains",
+        "json_equals",
+        "json_match"
+      ],
+      "checker_names": [
+        "task-acceptance"
+      ]
+    },
+    {
+      "id": "artifacts",
+      "description": "Required deliverables are complete",
+      "applicable": true,
+      "allowed_kinds": [
+        "external",
+        "file_exists",
+        "text_contains",
+        "json_equals",
+        "json_match"
+      ],
+      "checker_names": [
+        "task-acceptance"
+      ]
+    },
+    {
+      "id": "build",
+      "description": "Build and startup in the required environment",
+      "applicable": true,
+      "allowed_kinds": [
+        "external"
+      ],
+      "checker_names": [
+        "task-acceptance"
+      ]
+    },
+    {
+      "id": "components",
+      "description": "Individual components behave correctly",
+      "applicable": true,
+      "allowed_kinds": [
+        "external"
+      ],
+      "checker_names": [
+        "task-acceptance"
+      ]
+    },
+    {
+      "id": "interfaces",
+      "description": "Component input/output contracts agree",
+      "applicable": true,
+      "allowed_kinds": [
+        "external"
+      ],
+      "checker_names": [
+        "task-acceptance"
+      ]
+    },
+    {
+      "id": "resources",
+      "description": "Resources are not allocated beyond permitted capacity",
+      "applicable": true,
+      "allowed_kinds": [
+        "external"
+      ],
+      "checker_names": [
+        "task-acceptance"
+      ]
+    },
+    {
+      "id": "transactions",
+      "description": "State transitions, atomicity and idempotency",
+      "applicable": true,
+      "allowed_kinds": [
+        "external"
+      ],
+      "checker_names": [
+        "task-acceptance"
+      ]
+    },
+    {
+      "id": "fulfillment",
+      "description": "Business fulfillment follows specified rules",
+      "applicable": true,
+      "allowed_kinds": [
+        "external"
+      ],
+      "checker_names": [
+        "task-acceptance"
+      ]
+    },
+    {
+      "id": "compensation",
+      "description": "Cancellation, refunds and resource release",
+      "applicable": true,
+      "allowed_kinds": [
+        "external"
+      ],
+      "checker_names": [
+        "task-acceptance"
+      ]
+    },
+    {
+      "id": "persistence",
+      "description": "Durable state and restart recovery",
+      "applicable": true,
+      "allowed_kinds": [
+        "external"
+      ],
+      "checker_names": [
+        "task-acceptance"
+      ]
+    },
+    {
+      "id": "integration",
+      "description": "Entry points and composed business flows",
+      "applicable": true,
+      "allowed_kinds": [
+        "external"
+      ],
+      "checker_names": [
+        "task-acceptance"
+      ]
+    },
+    {
+      "id": "regression",
+      "description": "Existing required behavior remains correct",
+      "applicable": true,
+      "allowed_kinds": [
+        "external"
+      ],
+      "checker_names": [
+        "task-acceptance"
+      ]
+    }
+  ]
+}

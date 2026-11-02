@@ -28,6 +28,7 @@ if str(SRC) not in sys.path:
 from feasibility_scheduler.adapters.legacy_doc import (  # noqa: E402
     LegacyDocConfig,
     default_paths,
+    load_task_input,
     run_legacy_doc,
 )
 
@@ -87,6 +88,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="native 模式的原生 Agent 请求/响应目录，由宿主调度 Agent 处理")
     parser.add_argument("--acceptance-script", type=Path, default=None,
                         help="宿主指定的 Node 黑箱验收脚本，注册为 task-acceptance 根门禁")
+    parser.add_argument("--acceptance-profile", type=Path, default=None,
+                        help="宿主验收配置 JSON；http/native 默认启用 software-v1，需提供真实验收器")
     parser.add_argument(
         "--model",
         default=None,
@@ -116,6 +119,14 @@ def main(argv: list[str] | None = None) -> int:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     workdir = args.workdir or (ROOT / "runs" / f"legacy-doc-{stamp}")
 
+    from feasibility_scheduler.adapters.acceptance_profile import software_profile
+    profile = None
+    if args.client in {"http", "native"}:
+        profile = load_task_input(args.task_input).get("acceptance_profile")
+        if profile is None:
+            profile = software_profile()
+    if args.acceptance_profile is not None:
+        profile = json.loads(args.acceptance_profile.read_text(encoding="utf-8-sig"))
     cfg = LegacyDocConfig(
         task_input_path=args.task_input,
         task_md_path=args.task_md,
@@ -128,6 +139,7 @@ def main(argv: list[str] | None = None) -> int:
         contract_repair_limit=args.contract_repair_limit,
         native_bridge_dir=args.native_bridge_dir,
         acceptance_script=args.acceptance_script,
+        acceptance_profile=profile,
         module_ids=_parse_modules(args.modules),
         model=args.model,
         timeout_seconds=args.timeout_seconds,
@@ -147,7 +159,11 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
 
-    outcome = run_legacy_doc(cfg)
+    try:
+        outcome = run_legacy_doc(cfg)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
     print(
         json.dumps(
             {

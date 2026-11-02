@@ -30,7 +30,7 @@ class RewriteCandidate:
     """一次候选改图。"""
 
     candidate_id: str
-    kind: str  # keep | split | merge
+    kind: str  # keep | split | merge | recovery_split
     reason: str
     score: float
     # 应用后完整任务列表（含未改动的任务）
@@ -207,6 +207,8 @@ def _merge_pair(
     """合并两个未领取、文件不交叠的真实模块。"""
     owned_l = _owned(left)
     owned_r = _owned(right)
+    if left.payload.get("disable_merge") or right.payload.get("disable_merge"):
+        return None
     if left.payload.get("contract_hash") != right.payload.get("contract_hash"):
         return None
     if not owned_l or not owned_r:
@@ -404,6 +406,29 @@ def _slug(path: str) -> str:
         else:
             out.append("_")
     return "".join(out)[:40] or "file"
+
+
+def recover_failed_merge(tasks: Sequence[Task], task: Task) -> RewriteCandidate | None:
+    """Bounded fallback after confirmed server-error exhaustion, not ambiguous timeouts."""
+    if not task.payload.get("merged_from") or task.payload.get("merge_recovery_depth", 0) >= 1:
+        return None
+    split = _split_module(tasks, task, serial=1)
+    if split is None:
+        return None
+    recovered = []
+    for child in split.tasks:
+        if child.id in split.added_ids:
+            child = Task(id=child.id, dependencies=child.dependencies, constraints=child.constraints,
+                         constraints_declared=child.constraints_declared, output_contract=child.output_contract,
+                         payload={**child.payload, "disable_merge": True, "merge_recovery_depth": 1,
+                                  "recovered_from": task.id})
+        recovered.append(child)
+    after = _validate_or_none(recovered)
+    if after is None:
+        return None
+    return RewriteCandidate(candidate_id=f"recover-split:{task.id}", kind="recovery_split", reason="合并任务请求失败耗尽，按文件拆回并禁止重新合并",
+                            score=split.score, tasks=after, removed_ids=split.removed_ids, added_ids=split.added_ids,
+                            details={"failed_parent": task.id, "bounded_recovery": True})
 
 
 def generate_candidates(

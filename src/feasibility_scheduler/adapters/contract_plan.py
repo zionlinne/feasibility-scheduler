@@ -83,6 +83,12 @@ def validate_plan(plan: Any, tasks: Sequence[Task]) -> None:
     ] + [Task(id=cid, dependencies=tuple(by_id[cid]["execution_dependencies"])
               if cid in by_id else parent_tasks[parent].dependencies)
          for cid, (parent, _) in children.items()])
+    from .acceptance_profile import validate_responsibilities
+    for task in tasks:
+        expected = task.payload.get("acceptance_profile")
+        if expected is not None and plan.get("acceptance_profile") != expected:
+            raise ValueError("contract differs from the host acceptance profile")
+    validate_responsibilities(plan, tasks)
 
 
 def bind_source_requirements(plan: Any, task_md: str) -> list[str]:
@@ -120,6 +126,24 @@ def generate_plan(client: Any, tasks: Sequence[Task], task_md: str, *, audit_dir
     example["requirements"] = [{"id": row["id"]} for row in ledger]
     example["checks"] = []
     example["decompositions"] = []
+    profile = tasks[0].payload.get("acceptance_profile") if tasks else None
+    profile_prompt = ""
+    if profile is not None:
+        example["acceptance_assignments"] = []
+        profile_prompt = (
+            "\nHOST ACCEPTANCE PROFILE (immutable; do not copy or change it)\n" + canonical(profile)
+            + '\nReturn acceptance_assignments: [{"id":"unique", "category":"profile category ID", '
+              '"requirements":["R1"], "owners":["module ID"], "checks":["check ID"], "scope":"local"}]. '
+              'Cover every applicable category, every source requirement and every check. '
+              'A local assignment has one owner; cross has at least two; root has only '
+              '__contract_composition__ as owner. Owners may reference proposed children. '
+              'Cross/root checks run after integration. External workspace checkers must use root scope. '
+              'Use only category-approved predicate kinds and checker names. manual is not executable '
+              'and cannot satisfy this profile. Never substitute file or syntax checks for business tests. '
+              'The same independent suite may support several categories only if it really tests them. '
+              'If verification capability or coverage is missing, describe it in unresolved; do not invent evidence. '
+              'Keep decomposition free: the profile specifies obligations, not module count or a fixed DAG.\n'
+        )
     prompt = (
         "Generate a domain-neutral contract plan as one JSON object with the following shape. "
         "Replace descriptive placeholders with concrete requirements grounded in TASK. "
@@ -155,7 +179,7 @@ def generate_plan(client: Any, tasks: Sequence[Task], task_md: str, *, audit_dir
         "Interface dependencies can run in parallel using shared agreed representations. "
         "Preserve all root requirements, define composition checks and review cases where all local "
         "checks pass but the root fails. Put blocking questions in unresolved, otherwise use []. Never invent requirements.\n"
-        + canonical(example) + "\nHOST SOURCE LEDGER (read-only; reference IDs only)\n" + canonical(ledger)
+        + profile_prompt + canonical(example) + "\nHOST SOURCE LEDGER (read-only; reference IDs only)\n" + canonical(ledger)
         + "\nTASK\n" + task_md + "\nMODULES\n"
         + canonical([{"id": t.id, "owned_files": list(t.payload.get("owned_files", ())),
                       "title": t.payload.get("title"), "outputs": list(t.payload.get("outputs", ()))} for t in tasks])
@@ -164,7 +188,11 @@ def generate_plan(client: Any, tasks: Sequence[Task], task_md: str, *, audit_dir
         + "\nTRUSTED EXTERNAL CHECKER NAMES\n"
         + canonical(list(tasks[0].payload.get("external_checker_names", [])) if tasks else [])
         + '\nWhen applicable, use {"id":"integration","kind":"external","name":"trusted-name",'
-          '"paths":["owned/output/path"],"requirements":["R1"]} to execute the registered checker. '
+          '"read_paths":["owned/output/path","provided/input/path"],'
+          '"repair_paths":["owned/output/path"],"requirements":["R1"]} to execute the registered checker. '
+          'read_paths lists artifacts/materials relevant to verification, including registered read-only inputs. '
+          'repair_paths lists only owned outputs that may be replaced after failure; use [] if nothing is repairable. '
+          'Never assign ownership or repair permission to provided materials. Do not use the legacy paths field. '
           'Only registered names are valid; no shell commands can be supplied by the model. '
           'A complete supplied black-box suite can discharge requirements it tests; retain manual obligations '
           'for requirements outside its coverage. Include concrete shared function signatures and state shape '
@@ -187,6 +215,10 @@ def generate_plan(client: Any, tasks: Sequence[Task], task_md: str, *, audit_dir
             (audit_dir / "contract-candidate.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
         validation["source_ledger_owner"] = "host"
         validation["ignored_model_source_fields"] = bind_source_requirements(plan, task_md)
+        if profile is not None:
+            from .acceptance_profile import bind_profile, complete_root_references
+            bind_profile(plan, profile)
+            validation["completed_root_references"] = complete_root_references(plan, tasks)
         validate_plan(plan, tasks)
         validation["status"] = "passed"
     except (ValueError, TypeError) as exc:
@@ -219,12 +251,14 @@ def refresh_contract(task: Task) -> Task:
     if not plan or plan.get("version") != 2 or task.payload.get("contract_composition"):
         return task
     from .contract_checks import check_paths
+    from .acceptance_profile import deferred_checks, project_responsibilities
     payload = dict(task.payload)
     owned = set(payload.get("owned_files", ()))
+    root_checks = deferred_checks(plan)
     local, deferred = [], []
     for check in plan["checks"]:
         paths = check_paths(check)
-        if paths and paths <= owned:
+        if paths and paths <= owned and check["id"] not in root_checks:
             local.append(check["id"])
         elif paths & owned:
             deferred.append(check["id"])
@@ -239,6 +273,8 @@ def refresh_contract(task: Task) -> Task:
         payload["contract_module_ids"] = [task.id]
     unit["module_contracts"] = [declarations[mid] for mid in payload.get("contract_module_ids", [])
                                 if mid in declarations]
+    if "acceptance_profile" in plan:
+        unit["acceptance_responsibilities"] = project_responsibilities(task, local, deferred)
     payload["execution_contract"] = unit
     payload["execution_contract_hash"] = "sha256:" + hashlib.sha256(canonical(unit).encode()).hexdigest()
     # Replace the previous projection, retaining the immutable shared contract.
