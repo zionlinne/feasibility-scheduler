@@ -125,9 +125,11 @@ def make_lean_acceptor(
 def _parse_axioms(output: str) -> frozenset[str] | None:
     """Fail closed unless Lean explicitly attests the fixed theorem's axioms."""
     prefix = rf"(?:['`])?{re.escape(_NAME)}(?:['`])?"
-    if re.search(prefix + r"\s+does not depend on any axioms", output):
-        return frozenset()
-    match = re.search(prefix + r"\s+depends on axioms:\s*\[([^\]]*)\]", output)
-    if match is None:
+    pattern = prefix + r"\s+(does not depend on any axioms|depends on axioms:\s*\[([^\]]*)\])"
+    matches = list(re.finditer(pattern, output))
+    if len(matches) != 1:  # Missing or conflicting declarations fail closed.
         return None
-    return frozenset(a.strip() for a in match.group(1).split(",") if a.strip())
+    match = matches[0]
+    if match.group(2) is None:
+        return frozenset()
+    return frozenset(a.strip() for a in match.group(2).split(",") if a.strip())
