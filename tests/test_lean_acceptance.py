@@ -116,3 +116,43 @@ def test_real_lean_acceptance_smoke():
     acceptor = make_lean_acceptor(goal_statement="(1 + 1 : Nat) = 2")
     assert acceptor(Task(id="math"), response("by rfl")).passed
     assert not acceptor(Task(id="math"), response("by sorry")).passed
+
+
+def test_executor_uses_lean_acceptor_without_changing_dispatch(monkeypatch, tmp_path):
+    """End-to-end FBS integration with mocked Lean: READY -> ACCEPTED."""
+    from feasibility_scheduler.events import EventLog
+    from feasibility_scheduler.executor import Executor
+    from feasibility_scheduler.fake_client import FakeClient
+    from feasibility_scheduler.statemachine import TaskState
+    from feasibility_scheduler.store import TaskStore
+
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(
+            a[0], 0, "'fbs_goal' does not depend on any axioms", ""
+        ),
+    )
+    task = Task(
+        id="math",
+        constraints_declared=True,
+        # FBS's existing graph validator requires a declared output contract,
+        # even when the custom acceptor is used instead of contract_acceptor.
+        output_contract={"type": "object"},
+        payload={"work": "Prove the fixed Lean theorem"},
+    )
+    store = TaskStore()
+    try:
+        log = EventLog(tmp_path / "lean-events.jsonl", run_id="lean-test")
+        outcome = Executor(
+            [task],
+            store=store,
+            log=log,
+            client=FakeClient([Step.success('{"proof": "by rfl"}')]),
+            acceptor=make_lean_acceptor(goal_statement="(1 + 1 : Nat) = 2"),
+        ).run()
+        assert outcome.ok
+        assert outcome.states["math"] is TaskState.ACCEPTED
+        assert outcome.reports["math"].passed
+        assert any(event.type == "acceptance_passed" for event in log.events())
+    finally:
+        store.close()
