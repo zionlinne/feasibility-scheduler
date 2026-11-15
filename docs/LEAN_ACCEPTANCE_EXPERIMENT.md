@@ -10,6 +10,9 @@ Install Lean 4 and put its executable on PATH. Fix the goal in trusted configura
 from feasibility_scheduler.lean_acceptance import make_lean_acceptor
 
 math_acceptor = make_lean_acceptor(goal_statement="(1 + 1 : Nat) = 2")
+# For this minimal PR, the current FBS graph validator still requires an
+# output_contract on each Task, e.g. output_contract={"type": "object"}.
+# That field is not used by the custom Lean acceptor.
 # Existing integration point:
 # Executor(tasks, client, acceptor=math_acceptor, ...).run()
 ~~~
