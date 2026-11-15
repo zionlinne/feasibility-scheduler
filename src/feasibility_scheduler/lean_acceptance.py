@@ -29,6 +29,7 @@ def make_lean_acceptor(
     goal_statement: str,
     lean_executable: str = "lean",
     timeout_seconds: float = 20.0,
+    lean_import: str = "Init",
 ) -> Acceptor:
     """Make a custom Executor acceptor for a fixed Lean proposition.
 
@@ -44,6 +45,8 @@ def make_lean_acceptor(
         raise ValueError("lean_executable must be set")
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.]*", lean_import):
+        raise ValueError("lean_import must name a trusted Lean module")
     goal = goal_statement.strip()
 
     def accept(task: Task, response: ApiResponse) -> AcceptanceReport:
@@ -73,7 +76,7 @@ def make_lean_acceptor(
             )
 
         source = (
-            "import Init\n"
+            f"import {lean_import}\n"
             "set_option autoImplicit false\n"
             f"theorem {_NAME} : {goal} := {proof}\n"
             f"#print axioms {_NAME}\n"
