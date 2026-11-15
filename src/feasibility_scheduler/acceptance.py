@@ -18,7 +18,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from numbers import Real
 from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping
@@ -180,7 +180,7 @@ class RunVerdict:
     acceptance_passed: bool
     trace_complete: bool
     reasons: tuple[str, ...]
-    external_gates: Mapping[str, bool | None] = MappingProxyType({})
+    external_gates: Mapping[str, bool | None] = field(default_factory=lambda: MappingProxyType({}))
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "reasons", tuple(self.reasons))
