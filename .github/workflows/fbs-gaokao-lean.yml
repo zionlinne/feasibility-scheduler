@@ -18,6 +18,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Install elan and update Mathlib lockfile
+        working-directory: experiments/gaokao_2026
+        run: |
+          curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.elan/bin:$PATH"
+          lake update
       - name: Install Lean with Mathlib
         uses: leanprover/lean-action@v1
         with:
