@@ -1,0 +1,290 @@
+{
+  "research_date": "2026-11-17",
+  "scope": "BTC 2026 YTD; settled prices through Nov15, settled flow sample through Nov13",
+  "tasks": [
+    {
+      "id": "market",
+      "dependencies": [],
+      "constraints": [],
+      "payload": {
+        "question": "核对BTC 2026市场路径和数据口径，计算截至2026-11-15已完成收盘的YTD、上半年/第三季度/第四季度至截止日收益，计算给定10个交易日ETF净流量。提供可追溯数据、计算公式、冲突与缺项。中文报告。",
+        "sources": {
+          "S1": {
+            "url": "https://www.coinglass.com/currencies/BTC/historical-data/2026",
+            "retrieved": "2026-11-17 Asia/Shanghai",
+            "kind": "Market-data publisher; dynamic snapshot",
+            "facts": {
+              "prior_year_close_usd": 87508.8,
+              "closed_2026_11_15_usd": 65305.1,
+              "monthly_closes_usd": {
+                "Jan": 78621.1,
+                "Feb": 66995.9,
+                "Mar": 68233.3,
+                "Apr": 76304.3,
+                "May": 73579.7,
+                "Jun": 58558.9,
+                "Jul": 62813.7,
+                "Aug": 78548.6,
+                "Sep": 83553.8,
+                "Oct": 77434.7
+              },
+              "highest_close_2026": {
+                "date": "2026-01-14",
+                "usd": 96929.3
+              },
+              "lowest_close_2026": {
+                "date": "2026-06-30",
+                "usd": 58558.9
+              }
+            },
+            "limitations": "Nov16 row marked In progress; exclude it from settled-price conclusions. OHLC intraday extremes differ from closing-price extrema. Full daily series not extracted; do not claim independently computed daily MDD, volatility, or correlation."
+          },
+          "S2": {
+            "url": "https://farside.co.uk/btc/",
+            "retrieved": "2026-11-17 Asia/Shanghai",
+            "kind": "Original flow compiler",
+            "facts": {
+              "unit": "USD millions",
+              "total_daily_net_flows": {
+                "2026-11-02": -398.6,
+                "2026-11-03": -115.6,
+                "2026-11-04": 74.6,
+                "2026-11-05": -430.2,
+                "2026-11-06": -411.9,
+                "2026-11-09": -201,
+                "2026-11-10": -95,
+                "2026-11-11": -299.8,
+                "2026-11-12": -284.1,
+                "2026-11-13": -185.4
+              }
+            },
+            "limitations": "Nov16 individual fund values are dashes despite total showing0; treat as missing, not zero flow. Displayed grand total is since launch, not 2026 YTD. Full annual flow series not collected."
+          },
+          "S3": {
+            "url": "https://www.federalreserve.gov/newsevents/pressreleases/monetary20261028a.htm",
+            "date": "2026-10-28",
+            "kind": "Primary central-bank statement",
+            "facts": {
+              "target_range_percent": [
+                3.75,
+                4
+              ],
+              "vote": "10-2",
+              "policy": "maintain target range; inflation remains elevated",
+              "dissent": "Two members preferred +25 basis points."
+            },
+            "limitations": "Policy stance is verified; effect on BTC is a hypothesis, not causal identification."
+          },
+          "S4": {
+            "url": "https://assets.coingecko.com/reports/2026/CoinGecko-2026-Q3-Crypto-Industry-Report.pdf?attri_cid=xzsbqakpdv8h",
+            "kind": "Market-data publisher report; search-index excerpt only, full PDF retrieval failed",
+            "facts": {
+              "btc_q3_return_percent": 42.7,
+              "btc_q3_close_usd": 83576,
+              "us_spot_btc_etf_q3_net_inflows_usd_billion": 6.4,
+              "etf_ytd_net_inflows_at_sept_end_usd_billion": 0.97
+            },
+            "limitations": "Secondary corroboration only; values differ slightly from S1 due to pricing methodology. September YTD flow is not November YTD flow; do not extrapolate. Full document not inspected."
+          }
+        }
+      },
+      "criteria": {
+        "scope": "回答BTC 2026年初至今的问题；注明2026-11-17检索日和各数据实际截止日；末年未完结，不写全年已实现结论。",
+        "evidence": "每个实质数据和历史事件引用冻结来源ID及URL；分清观察、计算、机制假说；披露缺项和来源冲突，不捏造链上、监管、杠杆或价格目标。",
+        "arithmetic": "收益率用同一来源的2025年底收盘基准；流量单位正确；未披露数据不可当0；不得把高低点跌幅称为完整日序列最大回撤。",
+        "alternatives": "给出竞争解释、反证或失效条件；情景不赋予无依据概率，不提供个性化仓位或保证收益。"
+      }
+    },
+    {
+      "id": "drivers",
+      "dependencies": [
+        "market"
+      ],
+      "constraints": [],
+      "payload": {
+        "question": "基于已验收market分析及冻结来源，评估2026BTC的资金流和宏观机制。区分事实、因果假说与未验证项，至少给出两个竞争解释及后续验证指标；明确链上和监管证据缺口。中文报告。",
+        "sources": {
+          "S1": {
+            "url": "https://www.coinglass.com/currencies/BTC/historical-data/2026",
+            "retrieved": "2026-11-17 Asia/Shanghai",
+            "kind": "Market-data publisher; dynamic snapshot",
+            "facts": {
+              "prior_year_close_usd": 87508.8,
+              "closed_2026_11_15_usd": 65305.1,
+              "monthly_closes_usd": {
+                "Jan": 78621.1,
+                "Feb": 66995.9,
+                "Mar": 68233.3,
+                "Apr": 76304.3,
+                "May": 73579.7,
+                "Jun": 58558.9,
+                "Jul": 62813.7,
+                "Aug": 78548.6,
+                "Sep": 83553.8,
+                "Oct": 77434.7
+              },
+              "highest_close_2026": {
+                "date": "2026-01-14",
+                "usd": 96929.3
+              },
+              "lowest_close_2026": {
+                "date": "2026-06-30",
+                "usd": 58558.9
+              }
+            },
+            "limitations": "Nov16 row marked In progress; exclude it from settled-price conclusions. OHLC intraday extremes differ from closing-price extrema. Full daily series not extracted; do not claim independently computed daily MDD, volatility, or correlation."
+          },
+          "S2": {
+            "url": "https://farside.co.uk/btc/",
+            "retrieved": "2026-11-17 Asia/Shanghai",
+            "kind": "Original flow compiler",
+            "facts": {
+              "unit": "USD millions",
+              "total_daily_net_flows": {
+                "2026-11-02": -398.6,
+                "2026-11-03": -115.6,
+                "2026-11-04": 74.6,
+                "2026-11-05": -430.2,
+                "2026-11-06": -411.9,
+                "2026-11-09": -201,
+                "2026-11-10": -95,
+                "2026-11-11": -299.8,
+                "2026-11-12": -284.1,
+                "2026-11-13": -185.4
+              }
+            },
+            "limitations": "Nov16 individual fund values are dashes despite total showing0; treat as missing, not zero flow. Displayed grand total is since launch, not 2026 YTD. Full annual flow series not collected."
+          },
+          "S3": {
+            "url": "https://www.federalreserve.gov/newsevents/pressreleases/monetary20261028a.htm",
+            "date": "2026-10-28",
+            "kind": "Primary central-bank statement",
+            "facts": {
+              "target_range_percent": [
+                3.75,
+                4
+              ],
+              "vote": "10-2",
+              "policy": "maintain target range; inflation remains elevated",
+              "dissent": "Two members preferred +25 basis points."
+            },
+            "limitations": "Policy stance is verified; effect on BTC is a hypothesis, not causal identification."
+          },
+          "S4": {
+            "url": "https://assets.coingecko.com/reports/2026/CoinGecko-2026-Q3-Crypto-Industry-Report.pdf?attri_cid=xzsbqakpdv8h",
+            "kind": "Market-data publisher report; search-index excerpt only, full PDF retrieval failed",
+            "facts": {
+              "btc_q3_return_percent": 42.7,
+              "btc_q3_close_usd": 83576,
+              "us_spot_btc_etf_q3_net_inflows_usd_billion": 6.4,
+              "etf_ytd_net_inflows_at_sept_end_usd_billion": 0.97
+            },
+            "limitations": "Secondary corroboration only; values differ slightly from S1 due to pricing methodology. September YTD flow is not November YTD flow; do not extrapolate. Full document not inspected."
+          }
+        }
+      },
+      "criteria": {
+        "scope": "回答BTC 2026年初至今的问题；注明2026-11-17检索日和各数据实际截止日；末年未完结，不写全年已实现结论。",
+        "evidence": "每个实质数据和历史事件引用冻结来源ID及URL；分清观察、计算、机制假说；披露缺项和来源冲突，不捏造链上、监管、杠杆或价格目标。",
+        "arithmetic": "收益率用同一来源的2025年底收盘基准；流量单位正确；未披露数据不可当0；不得把高低点跌幅称为完整日序列最大回撤。",
+        "alternatives": "给出竞争解释、反证或失效条件；情景不赋予无依据概率，不提供个性化仓位或保证收益。"
+      }
+    },
+    {
+      "id": "synthesis",
+      "dependencies": [
+        "market",
+        "drivers"
+      ],
+      "constraints": [],
+      "payload": {
+        "question": "基于真实验收的上游报告，形成中文BTC 2026年初至今研报，标题注明数据口径。包含直观核心结论、分阶段行情、ETF与宏观驱动、替代解释、上行/基准/下行情景及可观测触发条件、风险和数据缺口、来源清单。可复算关键数据，不能把FBS流程通过说成预测或投资正确。",
+        "sources": {
+          "S1": {
+            "url": "https://www.coinglass.com/currencies/BTC/historical-data/2026",
+            "retrieved": "2026-11-17 Asia/Shanghai",
+            "kind": "Market-data publisher; dynamic snapshot",
+            "facts": {
+              "prior_year_close_usd": 87508.8,
+              "closed_2026_11_15_usd": 65305.1,
+              "monthly_closes_usd": {
+                "Jan": 78621.1,
+                "Feb": 66995.9,
+                "Mar": 68233.3,
+                "Apr": 76304.3,
+                "May": 73579.7,
+                "Jun": 58558.9,
+                "Jul": 62813.7,
+                "Aug": 78548.6,
+                "Sep": 83553.8,
+                "Oct": 77434.7
+              },
+              "highest_close_2026": {
+                "date": "2026-01-14",
+                "usd": 96929.3
+              },
+              "lowest_close_2026": {
+                "date": "2026-06-30",
+                "usd": 58558.9
+              }
+            },
+            "limitations": "Nov16 row marked In progress; exclude it from settled-price conclusions. OHLC intraday extremes differ from closing-price extrema. Full daily series not extracted; do not claim independently computed daily MDD, volatility, or correlation."
+          },
+          "S2": {
+            "url": "https://farside.co.uk/btc/",
+            "retrieved": "2026-11-17 Asia/Shanghai",
+            "kind": "Original flow compiler",
+            "facts": {
+              "unit": "USD millions",
+              "total_daily_net_flows": {
+                "2026-11-02": -398.6,
+                "2026-11-03": -115.6,
+                "2026-11-04": 74.6,
+                "2026-11-05": -430.2,
+                "2026-11-06": -411.9,
+                "2026-11-09": -201,
+                "2026-11-10": -95,
+                "2026-11-11": -299.8,
+                "2026-11-12": -284.1,
+                "2026-11-13": -185.4
+              }
+            },
+            "limitations": "Nov16 individual fund values are dashes despite total showing0; treat as missing, not zero flow. Displayed grand total is since launch, not 2026 YTD. Full annual flow series not collected."
+          },
+          "S3": {
+            "url": "https://www.federalreserve.gov/newsevents/pressreleases/monetary20261028a.htm",
+            "date": "2026-10-28",
+            "kind": "Primary central-bank statement",
+            "facts": {
+              "target_range_percent": [
+                3.75,
+                4
+              ],
+              "vote": "10-2",
+              "policy": "maintain target range; inflation remains elevated",
+              "dissent": "Two members preferred +25 basis points."
+            },
+            "limitations": "Policy stance is verified; effect on BTC is a hypothesis, not causal identification."
+          },
+          "S4": {
+            "url": "https://assets.coingecko.com/reports/2026/CoinGecko-2026-Q3-Crypto-Industry-Report.pdf?attri_cid=xzsbqakpdv8h",
+            "kind": "Market-data publisher report; search-index excerpt only, full PDF retrieval failed",
+            "facts": {
+              "btc_q3_return_percent": 42.7,
+              "btc_q3_close_usd": 83576,
+              "us_spot_btc_etf_q3_net_inflows_usd_billion": 6.4,
+              "etf_ytd_net_inflows_at_sept_end_usd_billion": 0.97
+            },
+            "limitations": "Secondary corroboration only; values differ slightly from S1 due to pricing methodology. September YTD flow is not November YTD flow; do not extrapolate. Full document not inspected."
+          }
+        }
+      },
+      "criteria": {
+        "scope": "回答BTC 2026年初至今的问题；注明2026-11-17检索日和各数据实际截止日；末年未完结，不写全年已实现结论。",
+        "evidence": "每个实质数据和历史事件引用冻结来源ID及URL；分清观察、计算、机制假说；披露缺项和来源冲突，不捏造链上、监管、杠杆或价格目标。",
+        "arithmetic": "收益率用同一来源的2025年底收盘基准；流量单位正确；未披露数据不可当0；不得把高低点跌幅称为完整日序列最大回撤。",
+        "alternatives": "给出竞争解释、反证或失效条件；情景不赋予无依据概率，不提供个性化仓位或保证收益。"
+      }
+    }
+  ]
+}
