@@ -1,0 +1,22 @@
+{
+  "task_id": "drivers",
+  "packet_sha256": "23f85e3c865c8c43331a5c907810c5e1904ea56dcade7dfab89bd3ee503b1477",
+  "criteria": {
+    "scope": {
+      "status": "pass",
+      "reason": "采用真实market上游分析，研究范围为2026 YTD，明确三个资料截止日期；解释资金与宏观通道并列出后续验证。"
+    },
+    "evidence": {
+      "status": "pass",
+      "reason": "政策区间、投票分歧对照S3无误；将机制推断与观察分开；明确S4只读索引摘要及跨源报价差异，未虚构政策/链上事实。"
+    },
+    "arithmetic": {
+      "status": "pass",
+      "reason": "不跨源重算收益或拼接不同日期ETF YTD，没有把空值补0；沿用市场报告核算口径，利率百分点与基点表述正确。"
+    },
+    "alternatives": {
+      "status": "pass",
+      "reason": "共同市场冲击与BTC内部卖出先行是两种可竞争路径，给出控制变量与头寸时序检验，保留ETF并非全部需求的反例边界。"
+    }
+  }
+}
