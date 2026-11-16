@@ -1,0 +1,1 @@
+{"acceptance_passed":true,"exit_code":0,"external_gates":{},"ok":true,"reasons":[],"scheduler_completed":true,"trace_complete":true}
