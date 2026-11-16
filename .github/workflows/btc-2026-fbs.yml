@@ -1,0 +1,27 @@
+name: BTC 2026 FBS research
+on:
+  push:
+    branches: ['experiment/btc-2026-cloud-20261117']
+    paths: ['cloud/btc2026/start.json']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Execute PR8 FBS with live report exchange
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHONPATH: src
+        run: python scripts/run_btc_cloud_exchange.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: btc-2026-fbs-research
+          path: cloud-run/
