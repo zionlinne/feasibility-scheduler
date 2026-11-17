@@ -22,14 +22,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Require configured API key
-        env:
-          MODEL_API_KEY: ${{ secrets.FBS_MODEL_API_KEY }}
-        run: |
-          if [ -z "$MODEL_API_KEY" ]; then
-            echo 'Add repository Actions secret FBS_MODEL_API_KEY before starting the API run.'
-            exit 1
-          fi
       - name: Set private runtime paths
         shell: bash
         run: |
@@ -37,6 +29,17 @@ jobs:
           echo "PLE_OPERATOR=$RUNNER_TEMP/ple-operator" >> "$GITHUB_ENV"
           echo "PLE_KIT=$RUNNER_TEMP/ple-kit" >> "$GITHUB_ENV"
           echo "PLE_RUN=$RUNNER_TEMP/ple-run" >> "$GITHUB_ENV"
+      - name: Prepare one-run API upload
+        run: python cloud/api_upload.py prepare "$PLE_OPERATOR"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ple-api-request-${{ github.run_id }}
+          retention-days: 1
+          path: ${{ runner.temp }}/ple-operator/api-request.json
+      - name: Wait for encrypted API upload
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python cloud/api_upload.py receive "$PLE_OPERATOR"
       - name: Install pinned operator tools and official kit
         shell: bash
         run: |
@@ -49,42 +52,25 @@ jobs:
           git clone https://github.com/google-research/ple.git "$PLE_KIT"
           git -C "$PLE_KIT" checkout 8320f0402fdca9f42476607f72bcfd5271cd50c9
           docker info --format '{{.ServerVersion}}'
-      - name: Verify API JSON and tool calls, then write private credentials
-        env:
-          MODEL_API_KEY: ${{ secrets.FBS_MODEL_API_KEY }}
+      - name: Verify API JSON and tool calls
         shell: bash
         run: |
           set -euo pipefail
           cd "$PLE_KIT"
           PYTHONPATH="$PLE_KIT" uv run --with pyyaml python "$GITHUB_WORKSPACE/cloud/check_api.py" "$GITHUB_WORKSPACE" \
+            --env-file "$PLE_OPERATOR/model.env" \
             2>&1 | tee "$PLE_OPERATOR/api-check.log"
-          python - <<'PY'
-          import os, pathlib
-          root=pathlib.Path(os.environ['PLE_OPERATOR'])
-          token=os.environ['MODEL_API_KEY']
-          if any(c in token for c in '\r\n\x00'): raise ValueError('Invalid API key')
-          (root/'model.env').write_text('MODEL_API_KEY='+token+'\n',encoding='utf-8')
-          (root/'model.env').chmod(0o600)
-          PY
       - name: Authorize approved Hugging Face account
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "$HF_TOKEN" ]; then
-            unset HF_TOKEN
-            echo 'Use the Hugging Face account approved for google/physical-engineerings-last-exam.'
-            hf auth login --format agent
-          fi
+          echo 'Use the Hugging Face account approved for google/physical-engineerings-last-exam.'
+          hf auth login --format agent
           hf auth whoami
       - name: Run representative task with the actual PR5 FBS runner
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "$HF_TOKEN" ]; then unset HF_TOKEN; fi
           cd "$PLE_KIT"
           uv run python eval/run.py "$GITHUB_WORKSPACE" \
             --env-file "$PLE_OPERATOR/model.env" \
@@ -119,4 +105,6 @@ jobs:
         if: always()
         shell: bash
         run: |
-          if [ -n "${PLE_OPERATOR:-}" ]; then rm -f -- "$PLE_OPERATOR/model.env"; fi
+          if [ -n "${PLE_OPERATOR:-}" ]; then
+            rm -f -- "$PLE_OPERATOR/model.env" "$PLE_OPERATOR/upload-private.pem"
+          fi

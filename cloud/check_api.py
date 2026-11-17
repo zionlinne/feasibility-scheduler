@@ -58,9 +58,16 @@ def main():
     import argparse
     parser=argparse.ArgumentParser()
     parser.add_argument('entry')
+    parser.add_argument('--env-file',type=Path)
     args=parser.parse_args()
     try:
-        result=probe(settings(args.entry),os.environ.get('MODEL_API_KEY',''))
+        key=os.environ.get('MODEL_API_KEY','')
+        if args.env_file:
+            text=args.env_file.read_text(encoding='utf-8')
+            if not text.startswith('MODEL_API_KEY=') or text.count('\n')!=1 or not text.endswith('\n'):
+                raise ValueError('Invalid private model env file')
+            key=text[len('MODEL_API_KEY='):-1]
+        result=probe(settings(args.entry),key)
     except Exception as exc:
         # Do not expose a provider response body, URL, request headers or key.
         result={'ok':False,'error_type':type(exc).__name__}
