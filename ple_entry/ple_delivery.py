@@ -146,6 +146,16 @@ def declared_package(instruction, root):
         r'(/[\w./-]+/output/[\w.-]+\.zip)\b', instruction, re.I)))
     names = list(dict.fromkeys(re.findall(
         r'\|\s*\x60([^\x60]+\.[a-zA-Z0-9]+)\x60\s*\|', instruction)))
+    if len(archive_paths) == 1 and not names:
+        archive = archive_paths[0]
+        final_deliverables = re.findall(
+            r'\bwrite\s+(?:your|the)\s+(?:final\s+)?deliverable\s+to\s+\x60([^\x60]+)\x60',
+            instruction, re.I,
+        )
+        if (set(final_deliverables) == {archive}
+                and PurePosixPath(archive).is_relative_to(PurePosixPath(root) / 'output')):
+            # The worker owns the whole ZIP when prose permits alternate member formats.
+            return normalize_spec({'files': [{'path': archive, 'kind': 'binary'}]}, root)
     if not names:
         names = _output_file_mentions(instruction)
     if len(archive_paths) != 1 or not names:

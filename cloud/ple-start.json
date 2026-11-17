@@ -1,6 +1,6 @@
 {
   "task": "mv-conveyance-study",
   "mode": "api-encrypted-upload",
-  "launch_attempt": 8,
-  "reason": "Restart after task output import failed before planning; retain five correction rounds"
+  "launch_attempt": 9,
+  "reason": "Rerun with the explicit final ZIP owned as one deliverable"
 }

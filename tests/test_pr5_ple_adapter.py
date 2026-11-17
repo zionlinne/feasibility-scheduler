@@ -397,3 +397,15 @@ Package these files in /app/files/output/submission.zip.
         '/app/files/output/design.xlsx',
         '/app/files/output/report.pdf',
     ]
+
+
+def test_explicit_final_zip_does_not_package_input_or_alternative_formats():
+    root = '/filesystem/project'
+    archive = root + '/output/submission.zip'
+    brief = (f'Read `task.md` first; write your deliverable to `{archive}`.\n'
+             'Include `study.xlsx` and a report (`report.md`, `.pdf` or `.docx`).')
+    assert declared_package(brief, root) == {
+        'root': root,
+        'files': [{'path': archive, 'kind': 'binary', 'artifact': 'receipts/submission.zip.json'}],
+        'archives': [],
+    }
