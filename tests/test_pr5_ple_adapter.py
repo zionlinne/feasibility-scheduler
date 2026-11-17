@@ -382,3 +382,18 @@ def test_task_io_import_fails_clearly_after_one_invalid_correction():
     assert [event[0] for event in events] == [
         'pr5_task_io_import_invalid', 'pr5_task_io_import_failed'
     ]
+
+
+def test_declared_output_list_accepts_explicit_absolute_file_paths():
+    source = '''
+Required deliverables:
+- Workbook: /app/files/output/design.xlsx
+- Report: /app/files/output/report.pdf
+Package these files in /app/files/output/submission.zip.
+'''
+    imported = declared_package(source, '/app/files')
+    assert imported is not None
+    assert [item['path'] for item in imported['files']] == [
+        '/app/files/output/design.xlsx',
+        '/app/files/output/report.pdf',
+    ]
