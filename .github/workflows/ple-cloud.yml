@@ -74,7 +74,7 @@ jobs:
           cd "$PLE_KIT"
           uv run python eval/run.py "$GITHUB_WORKSPACE" \
             --env-file "$PLE_OPERATOR/model.env" \
-            --tasks frame-extension-method --trials 1 --attempts 1 --out "$PLE_RUN" \
+            --tasks mv-conveyance-study --trials 1 --attempts 1 --out "$PLE_RUN" \
             2>&1 | tee "$PLE_OPERATOR/evaluation.log"
       - name: Collect serve metadata logs
         if: ${{ always() && env.PLE_RUN != '' }}

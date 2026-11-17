@@ -39,7 +39,8 @@ It waits for that run's encrypted upload before installing tools or calling a
 model. Changing only API code or the manifest does not launch a task. This
 workflow is not triggered by fork PRs.
 
-The representative run uses `frame-extension-method`, one trial and one
+The representative run uses `mv-conveyance-study` (13.8 kV electrical
+conveyance study), one trial and one
 infrastructure attempt. Download `ple-fbs-cloud-<run id>` for official scores,
 actual deliverables, serve logs and API probe metadata. Job success, FBS final
 acceptance and official score are separate outcomes. This does not submit to
