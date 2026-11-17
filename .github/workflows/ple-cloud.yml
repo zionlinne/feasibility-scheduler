@@ -1,0 +1,125 @@
+name: PLE single task on cloud FBS
+on:
+  push:
+    branches: ['experiment/ple-local-adapter-20261117']
+    paths: ['cloud/ple-start.json']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ple-cloud-single-task
+  cancel-in-progress: false
+jobs:
+  engineering:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      PYTHONUNBUFFERED: '1'
+      CODEX_HOME: ${{ runner.temp }}/ple-auth/codex
+      HF_HOME: ${{ runner.temp }}/ple-auth/huggingface
+      PLE_OPERATOR: ${{ runner.temp }}/ple-operator
+      PLE_KIT: ${{ runner.temp }}/ple-kit
+      PLE_RUN: ${{ runner.temp }}/ple-run
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install pinned operator tools and official kit
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$PLE_OPERATOR" "$CODEX_HOME" "$HF_HOME"
+          chmod 700 "$PLE_OPERATOR" "$CODEX_HOME" "$HF_HOME"
+          python -m pip install uv==0.13.8 huggingface-hub==1.33.0
+          uv tool install harbor==0.20.0 --with websockets==15.0.1
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          npm install -g @openai/codex@0.162.1
+          git clone https://github.com/google-research/ple.git "$PLE_KIT"
+          git -C "$PLE_KIT" checkout 8320f0402fdca9f42476607f72bcfd5271cd50c9
+          docker info --format '{{.ServerVersion}}'
+      - name: Authorize Codex subscription with official device login
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'Open this step and complete the official ChatGPT device authorization shown below.'
+          codex login --device-auth
+          codex login status
+      - name: Authorize approved Hugging Face account
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'Use the Hugging Face account approved for google/physical-engineerings-last-exam.'
+          hf auth login --format agent
+          hf auth whoami
+      - name: Start private subscription decision gateway
+        shell: bash
+        run: |
+          set -euo pipefail
+          python cloud/subscription_gateway.py \
+            --key-file "$PLE_OPERATOR/gateway.key" \
+            --log "$PLE_OPERATOR/gateway-calls.jsonl" \
+            --scratch "$PLE_OPERATOR/scratch" \
+            > "$PLE_OPERATOR/gateway.log" 2>&1 &
+          echo "$!" > "$PLE_OPERATOR/gateway.pid"
+          python - <<'PY'
+          import os, pathlib, time, urllib.request
+          root=pathlib.Path(os.environ['PLE_OPERATOR'])
+          for _ in range(60):
+              try:
+                  urllib.request.urlopen('http://172.17.0.1:4017/health', timeout=2)
+                  break
+              except OSError: time.sleep(1)
+          else: raise RuntimeError('Subscription gateway did not start')
+          token=(root/'gateway.key').read_text().strip()
+          (root/'model.env').write_text('MODEL_API_KEY='+token+'\n')
+          (root/'model.env').chmod(0o600)
+          PY
+      - name: Run representative task with the actual PR5 FBS runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PLE_KIT"
+          uv run python eval/run.py "$GITHUB_WORKSPACE" \
+            --env-file "$PLE_OPERATOR/model.env" \
+            --model-base-url http://172.17.0.1:4017/v1 \
+            --tasks frame-extension-method --trials 1 --attempts 1 --out "$PLE_RUN" \
+            2>&1 | tee "$PLE_OPERATOR/evaluation.log"
+      - name: Collect serve metadata logs
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os,pathlib,shutil
+          run=pathlib.Path(os.environ['PLE_RUN'])
+          target=pathlib.Path(os.environ['PLE_OPERATOR'])/'serve-logs'
+          target.mkdir(parents=True,exist_ok=True)
+          for i,p in enumerate(run.glob('attempt*/jobs/dev/*/agent/serve.log')):
+              shutil.copyfile(p,target/(str(i)+'-serve.log'))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ple-fbs-cloud-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 7
+          path: |
+            ${{ runner.temp }}/ple-run/results.json
+            ${{ runner.temp }}/ple-run/export.json
+            ${{ runner.temp }}/ple-run/artifacts/
+            ${{ runner.temp }}/ple-operator/evaluation.log
+            ${{ runner.temp }}/ple-operator/gateway.log
+            ${{ runner.temp }}/ple-operator/gateway-calls.jsonl
+            ${{ runner.temp }}/ple-operator/serve-logs/
+      - name: Stop gateway
+        if: always()
+        shell: bash
+        run: |
+          if [ -f "$PLE_OPERATOR/gateway.pid" ]; then
+            kill "$(cat "$PLE_OPERATOR/gateway.pid")" 2>/dev/null || true
+          fi

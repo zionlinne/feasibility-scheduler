@@ -1,6 +1,7 @@
 """PLE transport around PR5's unchanged native runner and acceptance hooks."""
 from __future__ import annotations
 import asyncio
+from dataclasses import replace
 import hashlib
 import json
 import os
@@ -9,14 +10,26 @@ import re
 import shlex
 import tempfile
 
-from feasibility_scheduler.adapters.legacy_doc import LegacyDocConfig, run_legacy_doc
+from feasibility_scheduler.adapters.legacy_doc import LegacyDocConfig, run_legacy_doc, build_legacy_tasks
 from mcp_tools import TaskMcpTools, TOOLS as MCP_TOOLS
 from ple_delivery import (Delivery, EvidenceSession, declared_package, first_reads,
                           normalize_spec, task_root)
+from ple_contract import prepare_contract
 
 
 def event(kind, **values):
     print(json.dumps({'event':kind,**values}),flush=True)
+
+
+def host_profile():
+    return {'id':'ple-engineering-v1','categories':[
+        {'id':'delivery','description':'Required files are complete and parseable','applicable':True,
+         'allowed_kinds':['file_exists','text_contains','json_equals','json_match','external'],
+         'checker_names':['ple-format','ple-package-evidence','ple-root-review']},
+        {'id':'package_execution','description':'Exact delivery paths, current archive members and actual host execution/read-order evidence',
+         'applicable':True,'allowed_kinds':['external'],'checker_names':['ple-package-evidence']},
+        {'id':'engineering','description':'Original engineering obligations and cross-file consistency are substantively checked',
+         'applicable':True,'allowed_kinds':['external'],'checker_names':['ple-root-review']}]}
 
 
 def parse_object(text):
@@ -34,13 +47,21 @@ def canonicalize_paths(body,aliases,*,planning):
     def paths(obj,key):
         if isinstance(obj.get(key),list): obj[key]=[aliases.get(x,x) if isinstance(x,str) else x for x in obj[key]]
     if planning:
-        for check in body.get('checks',[]):
+        checks=body.get('checks')
+        for check in checks if isinstance(checks,list) else []:
+            if not isinstance(check,dict): continue
             for key in ('path','other_path'):
                 if isinstance(check.get(key),str):check[key]=aliases.get(check[key],check[key])
             for key in ('paths','read_paths','repair_paths'):paths(check,key)
-        for module in body.get('modules',[]):paths(module,'owned_files')
-        for proposal in body.get('decompositions',[]):
-            for child in proposal.get('children',[]):paths(child,'owned_files')
+        modules=body.get('modules')
+        for module in modules if isinstance(modules,list) else []:
+            if isinstance(module,dict): paths(module,'owned_files')
+        proposals=body.get('decompositions')
+        for proposal in proposals if isinstance(proposals,list) else []:
+            if not isinstance(proposal,dict): continue
+            children=proposal.get('children')
+            for child in children if isinstance(children,list) else []:
+                if isinstance(child,dict): paths(child,'owned_files')
     else:
         if isinstance(body.get('files'),dict):
             projected={}
@@ -74,7 +95,7 @@ class ModelWorker:
         self.model=os.environ['MODEL_NAME']
         self.delivery=delivery
 
-    async def run(self,prompt,*,planning=False,review=False,importing=False):
+    async def run(self,prompt,*,planning=False,review=False,importing=False,protocol_feedback=False):
         rules=(('You import task I/O for the PR5 adapter. ' if importing else
                 'You execute a request dispatched by the existing PR5 FBS harness. ')+
           'Follow its current contract, ownership, checks and output JSON schema. '
@@ -85,7 +106,12 @@ class ModelWorker:
           'The original task documents are available through the official task tools. '
           'Return exactly the requested JSON object, without Markdown. '
           'Do not ask the operator to do work or create a separate planning workflow. ')
-        if importing:
+        if protocol_feedback:
+            rules+=('Return only the requested JSON additions to missing contract fields. '
+                    'Do not regenerate the full contract, solve the engineering task, use tools, '
+                    'weaken existing obligations, or erase real blockers. Values must be grounded '
+                    'in the supplied task and the existing contract. ')
+        elif importing:
             rules+=('Import task I/O only; do not solve or design a workflow. Read the brief and '
                     'only the referenced material needed to identify actual requested outputs. '
                     'Return {"files":[{"path":"absolute task-container path","kind":"text|binary|final_message"}],'
@@ -247,14 +273,7 @@ async def solve(session):
         directory=Path(temporary);bridge=directory/'native';bridge.mkdir()
         source=directory/'source';source.mkdir()
         (source/'TASK.md').write_text(task_source,encoding='utf8')
-        profile={'id':'ple-engineering-v1','categories':[
-          {'id':'delivery','description':'Required files are complete and parseable','applicable':True,
-           'allowed_kinds':['file_exists','text_contains','json_equals','json_match','external'],
-           'checker_names':['ple-format','ple-package-evidence','ple-root-review']},
-          {'id':'package_execution','description':'Exact delivery paths, current archive members and actual host execution/read-order evidence',
-           'applicable':True,'allowed_kinds':['external'],'checker_names':['ple-package-evidence']},
-          {'id':'engineering','description':'Original engineering obligations and cross-file consistency are substantively checked',
-           'applicable':True,'allowed_kinds':['external'],'checker_names':['ple-root-review']}]}
+        profile=host_profile()
         task_input={'modules':[{'module_id':'submission','title':'Complete the requested engineering package',
           'owned_files':names,'outputs':names,'deps':[],'estimated_tokens':24000}],
           'reference_files':references,'external_checker_names':['ple-format','ple-package-evidence','ple-root-review'],
@@ -303,6 +322,9 @@ async def solve(session):
           acceptance_profile=profile,external_checkers={
             'ple-format':delivery.local_check,'ple-package-evidence':package_checker,
             'ple-root-review':root_checker})
+        validation_tasks=[replace(t,payload={**t.payload,'acceptance_profile':profile,
+                          'planning_standard':cfg.planning_standard})
+                          for t in build_legacy_tasks(task_input,task_md=task_source)]
         done=asyncio.create_task(asyncio.to_thread(run_legacy_doc,cfg))
         handled=set();active=set();seen_events=set()
 
@@ -315,7 +337,11 @@ async def solve(session):
                 body=await worker.run(request['prompt'],planning=planning)
                 original=json.dumps(body,sort_keys=True)
                 body=canonicalize_paths(body,aliases,planning=planning)
-                if not planning:
+                if planning:
+                    body=await prepare_contract(body,worker=worker,tasks=validation_tasks,
+                        source=task_source,checkers=cfg.external_checkers,aliases=aliases,
+                        canonicalize=canonicalize_paths,event=event)
+                else:
                     body=await delivery.capture_binary(body,request.get('metadata',{}).get('owned_files',[]))
                 if json.dumps(body,sort_keys=True)!=original:
                     event('pr5_transport_paths_canonicalized',task_id=task_id)

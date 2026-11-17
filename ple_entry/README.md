@@ -49,6 +49,16 @@ Planning guidance distinguishes intentionally unavailable grading information
 from genuine missing execution prerequisites. Public targets remain unchanged.
 The adapter never clears/defaults `unresolved` or changes expected predicate values.
 
+Before a planning reply is handed to NativeClient, the adapter reuses PR5's
+original source binding, plan validation, responsibility checks and contract
+compilation for a preflight. Missing structural fields are reported together.
+One protocol-feedback correction supplies additions only for host-identified
+missing/blank fields, including conditional evidence limitations. The host applies
+the model's additions without regenerating the entire plan. An existing predicate
+or module obligation cannot be removed or changed. Nonempty blocking questions
+return unchanged without asking a model to clear them. The real PR5 gate still
+validates the final reply independently. Failed corrections remain failures.
+
 ## Focused validation
 
 ```
