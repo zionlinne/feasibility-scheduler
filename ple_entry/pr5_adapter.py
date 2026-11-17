@@ -39,6 +39,34 @@ def parse_object(text):
     return value
 
 
+def canonicalize_paths(body,aliases,*,planning):
+    """Translate only declared artifact aliases, never predicate values or text."""
+    body=json.loads(json.dumps(body))
+    def paths(obj,key):
+        if isinstance(obj.get(key),list): obj[key]=[aliases.get(x,x) if isinstance(x,str) else x for x in obj[key]]
+    if planning:
+        for check in body.get('checks',[]):
+            for key in ('path','other_path'):
+                if isinstance(check.get(key),str):check[key]=aliases.get(check[key],check[key])
+            for key in ('paths','read_paths','repair_paths'):paths(check,key)
+        for module in body.get('modules',[]):paths(module,'owned_files')
+        for proposal in body.get('decompositions',[]):
+            for child in proposal.get('children',[]):paths(child,'owned_files')
+    else:
+        if isinstance(body.get('files'),dict):
+            projected={}
+            for path,content in body['files'].items():
+                canonical=aliases.get(path,path)
+                if canonical in projected:raise ValueError('Duplicate artifact aliases')
+                projected[canonical]=content
+            body['files']=projected
+        paths(body,'manifest')
+        if isinstance(body.get('file'),dict):
+            path=body['file'].get('path')
+            if isinstance(path,str):body['file']['path']=aliases.get(path,path)
+    return body
+
+
 def tool(name,props):
     return {'type':'function','function':{'name':name,'description':name+' inside the official task container',
       'parameters':{'type':'object','properties':props,'required':list(props)}}}
@@ -74,13 +102,17 @@ class ModelWorker:
                     'checker ple-root-review is a fresh model review that inspects actual files and '
                     'recomputes engineering constraints with task tools. It returns failed or unverified '
                     'when evidence is inadequate. It is not a professional certification or the official grader. ')
+            rules+=('PR5 contract paths MUST use the exact canonical relative names in MODULES. '
+                    'Absolute paths in TASK describe the remote environment, not contract paths. '
+                    'Provided-material check paths use their exact registered provided/ names. ')
         elif review:
             rules+=('This is the host Root checker invoked by PR5. Inspect actual delivered files '
                     'and recompute relevant quantities with tools. Do not modify files. '
                     'A plausible narrative or nonempty file is not evidence of engineering compliance. ')
         else:
             rules+=('Compute using task tools, then deliver ALL current owned files as complete '
-                    'text contents in the PR5 files map. Do not replace files with paths or summaries. ')
+                    'text contents in the PR5 files map. Its keys MUST be the exact relative owned_files '
+                    'names, not absolute remote paths. Do not replace files with paths or summaries. ')
         tools=[] if planning else READ_TOOLS+([] if review else [WRITE_TOOL])+MCP_TOOLS
         router=TaskMcpTools(self.session,readonly=review)
         messages=[{'role':'system','content':rules},{'role':'user','content':prompt}]
@@ -166,6 +198,8 @@ async def solve(session):
     root=str(PurePosixPath(archive).parent.parent)
     task_source=(await session.read_file(root+'/task.md')).decode('utf8')
     references=await source_materials(session,root)
+    aliases={str(PurePosixPath(archive).parent/name):name for name in names}
+    aliases.update({str(PurePosixPath(root)/name.removeprefix('provided/')):name for name in references})
     worker=ModelWorker(session);loop=asyncio.get_running_loop()
     with tempfile.TemporaryDirectory(prefix='pr5-ple-') as temporary:
         directory=Path(temporary);bridge=directory/'native';bridge.mkdir()
@@ -231,6 +265,10 @@ async def solve(session):
             event('pr5_native_dispatch',task_id=task_id,planning=planning)
             try:
                 body=await worker.run(request['prompt'],planning=planning)
+                original=json.dumps(body,sort_keys=True)
+                body=canonicalize_paths(body,aliases,planning=planning)
+                if json.dumps(body,sort_keys=True)!=original:
+                    event('pr5_transport_paths_canonicalized',task_id=task_id)
                 envelope={'status':'success','producer':'subscription-model','body':body}
             except Exception as exc:
                 event('pr5_native_error',task_id=task_id,error_type=type(exc).__name__)

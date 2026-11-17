@@ -27,6 +27,23 @@ def test_delivery_syntax_checker_does_not_claim_engineering_compliance(tmp_path)
     assert adapter.format_check(tmp_path,['a.csv','b.json'])['status']=='failed'
 
 
+def test_namespace_translation_leaves_expected_values_and_unknown_paths_unchanged():
+    plan={'checks':[{'path':'/task/output/a.json','kind':'json_equals',
+        'value':{'path':'/task/output/a.json'},'requirements':['R1']},
+        {'path':'/outside/a.json','kind':'file_exists'}],
+        'modules':[{'owned_files':['/task/output/a.json']}],
+        'root':{'verification':'Read /task/output/a.json'}}
+    result=adapter.canonicalize_paths(plan,{'/task/output/a.json':'a.json'},planning=True)
+    assert result['checks'][0]['path']=='a.json'
+    assert result['checks'][0]['value']=={'path':'/task/output/a.json'}
+    assert result['checks'][1]['path']=='/outside/a.json'
+    assert result['root']==plan['root']
+    assert plan['checks'][0]['path']=='/task/output/a.json'
+    with pytest.raises(ValueError):
+        adapter.canonicalize_paths({'files':{'a.json':'x','/task/output/a.json':'y'}},
+                                   {'/task/output/a.json':'a.json'},planning=False)
+
+
 def test_pr5_native_exchange_preserves_its_request_and_output_contract(tmp_path):
     from feasibility_scheduler.native_client import NativeClient
     from feasibility_scheduler.client import ApiRequest,Outcome
