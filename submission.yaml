@@ -1,8 +1,10 @@
 name: fbs-ple
-model_api: google-cloud/gemini-3.8-flash
+model_api: openai-compatible/gpt-6-astra
+model_base_url: https://subscription.example.org/v1
 install: >-
   uv venv --python 3.12 /opt/harness/venv
   && uv pip install --python /opt/harness/venv/bin/python -r {src}/ple_entry/requirements.txt
 serve: /opt/harness/venv/bin/python {src}/ple_entry/serve.py
 env:
   PYTHONDONTWRITEBYTECODE: "1"
+  FBS_PLE_ENTRYPOINT: "pr5_adapter:solve"

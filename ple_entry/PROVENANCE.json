@@ -5,8 +5,8 @@
   "reused_files": {
     "taskbridge.py": "2f15766091ff1be44d58128d690177c7756c75e06650a46f706533e6b31b12a6"
   },
-  "model": "google-cloud/gemini-3.8-flash",
+  "model": "openai-compatible/gpt-6-astra",
   "dar_required": false,
-  "status": "interfaces retained; PR5 task adapter not connected",
-  "cleanup_validation": "no live model calls or engineering runs"
+  "status": "PR5 native runner connected for ZIP briefs with named text deliverables",
+  "cleanup_validation": "9 targeted checks passed; PR5 tracked files unchanged"
 }
