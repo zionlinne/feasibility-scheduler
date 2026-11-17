@@ -311,3 +311,74 @@ def test_missing_composition_and_conditional_module_limits_are_collected_togethe
     paths=missing_slots(plan,tasks)
     assert ['composition','counterexample_review'] in paths
     assert all(['modules',i,'acceptance_limitations'] in paths for i in range(len(plan['modules'])))
+
+
+def test_declared_output_list_imports_natural_language_xlsx_and_markdown():
+    source = '''
+Working in /app/files.
+Required deliverables:
+- Excel workbook: conveyance_study.xlsx
+- Markdown report: conveyance_study_report.md
+Write /app/files/output/submission.zip containing both deliverables.
+'''
+    imported = declared_package(source, '/app/files')
+    assert imported is not None
+    assert [item['kind'] for item in imported['files']] == ['binary', 'text']
+    assert [item['path'] for item in imported['files']] == [
+        '/app/files/output/conveyance_study.xlsx',
+        '/app/files/output/conveyance_study_report.md',
+    ]
+    assert imported['archives'][0]['members'] == {
+        'conveyance_study.xlsx': '/app/files/output/conveyance_study.xlsx',
+        'conveyance_study_report.md': '/app/files/output/conveyance_study_report.md',
+    }
+
+
+def test_declared_output_list_classifies_pdf_and_docx_as_binary():
+    source = '''
+Deliverables:
+1. Cost report: cost_report.pdf
+2. Calculation workbook: calculations.xlsx
+3. Editable report: editable_report.docx
+Create /workspace/output/submission.zip with these files.
+'''
+    imported = declared_package(source, '/workspace')
+    assert imported is not None
+    assert [item['kind'] for item in imported['files']] == ['binary', 'binary', 'binary']
+
+
+def test_task_io_import_retries_empty_files_once_then_accepts_valid_spec():
+    class Worker:
+        def __init__(self):
+            self.calls = []
+        async def run(self, prompt, **kwargs):
+            self.calls.append((prompt, kwargs))
+            if len(self.calls) == 1:
+                return {'files': [], 'archives': []}
+            return {'files': [{'kind': 'final_message'}], 'archives': []}
+
+    worker = Worker()
+    events = []
+    result = asyncio.run(adapter.import_task_spec(
+        worker, 'Task requires a substantive final response.', '/app/files',
+        lambda kind, **values: events.append((kind, values))))
+    assert result['files'][0]['kind'] == 'final_message'
+    assert len(worker.calls) == 2
+    assert worker.calls[1][1] == {'importing': True}
+    assert 'previous JSON response was rejected' in worker.calls[1][0]
+    assert events[0][0] == 'pr5_task_io_import_invalid'
+
+
+def test_task_io_import_fails_clearly_after_one_invalid_correction():
+    class Worker:
+        async def run(self, prompt, **kwargs):
+            return {'files': [], 'archives': []}
+
+    events = []
+    with pytest.raises(ValueError, match='failed after one correction attempt'):
+        asyncio.run(adapter.import_task_spec(
+            Worker(), 'Task output instructions are ambiguous.', '/app/files',
+            lambda kind, **values: events.append((kind, values))))
+    assert [event[0] for event in events] == [
+        'pr5_task_io_import_invalid', 'pr5_task_io_import_failed'
+    ]
