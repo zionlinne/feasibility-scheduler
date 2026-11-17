@@ -1,7 +1,0 @@
-{
-  "task": "frame-extension-method",
-  "mode": "api-encrypted-upload",
-  "protocol_fix": "af240aa135c1d18b07083f2225a1fd6ec3e2a43a",
-  "launch_attempt": 4,
-  "reason": "One-run credential upload; 88API gpt-6.1-sol; no repository Secrets"
-}
