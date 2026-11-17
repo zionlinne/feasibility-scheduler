@@ -280,11 +280,16 @@ async def solve(session):
           'acceptance_profile':profile}
         (source/'TASK_INPUT.json').write_text(json.dumps(task_input),encoding='utf8')
 
+        review_round=0
+
         async def review(workspace):
+            nonlocal review_round
             checked,evidence=await delivery.publish(workspace)
             if checked['status']!='passed': return checked
             before={n:hashlib.sha256((workspace/n).read_bytes()).hexdigest() for n in names}
-            event('pr5_root_review_started')
+            review_round+=1
+            round_number=review_round
+            event('pr5_root_review_started',round=round_number)
             prompt=(task_source+'\n\nHOST DELIVERY MAP:\n'+json.dumps(spec)
               +'\nACTUAL EXECUTION/PACKAGING EVIDENCE:\n'+json.dumps(evidence)
               +'\nACTUAL FBS TEXT ARTIFACTS:\n'+json.dumps({n:(workspace/n).read_text(encoding='utf8') for n in names})
@@ -305,7 +310,9 @@ async def solve(session):
             fingerprint=lambda e:{r['path']:r.get('sha256') for r in e['files']+e['archives']}
             if fingerprint(inspected)!=fingerprint(evidence):
                 return {'status':'unverified','detail':'Delivered task files changed during Root review'}
-            event('pr5_root_review_finished',status=status)
+            event('pr5_root_review_finished',round=round_number,status=status,
+                  detail=answer.get('detail',''),
+                  rejected_criteria=[c for c in criteria if c.get('status')!='passed'])
             return {'status':status,'detail':json.dumps(answer,ensure_ascii=False)}
 
         def root_checker(workspace):
@@ -316,9 +323,11 @@ async def solve(session):
             return checked
 
         remaining=max(1,session.time_left() or 21600)
+        repair_limit=int(os.environ.get('FBS_PLE_CONTRACT_REPAIR_LIMIT','1'))
         cfg=LegacyDocConfig(task_input_path=source/'TASK_INPUT.json',task_md_path=source/'TASK.md',
           workdir=directory/'run',client_kind='native',native_bridge_dir=bridge,
           policy='rewrite',acceptance='loose',timeout_seconds=remaining,lease_seconds=remaining+60,
+          contract_repair_limit=repair_limit,
           acceptance_profile=profile,external_checkers={
             'ple-format':delivery.local_check,'ple-package-evidence':package_checker,
             'ple-root-review':root_checker})
@@ -359,6 +368,7 @@ async def solve(session):
             event('pr5_native_response',task_id=task_id)
 
         event('pr5_runner_started',policy=cfg.policy,max_concurrency=cfg.max_concurrency,
+              contract_repair_limit=cfg.contract_repair_limit,
               official_seconds_remaining=round(remaining),source_files=len(references))
         try:
             while not done.done():

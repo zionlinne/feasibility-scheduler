@@ -8,3 +8,4 @@ serve: /opt/harness/venv/bin/python {src}/ple_entry/serve.py
 env:
   PYTHONDONTWRITEBYTECODE: "1"
   FBS_PLE_ENTRYPOINT: "pr5_adapter:solve"
+  FBS_PLE_CONTRACT_REPAIR_LIMIT: "5"
