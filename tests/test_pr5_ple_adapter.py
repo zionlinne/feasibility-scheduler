@@ -365,7 +365,7 @@ def test_task_io_import_retries_empty_files_once_then_accepts_valid_spec():
     assert result['files'][0]['kind'] == 'final_message'
     assert len(worker.calls) == 2
     assert worker.calls[1][1] == {'importing': True}
-    assert 'previous JSON response was rejected' in worker.calls[1][0]
+    assert 'previous importer response failed host validation' in worker.calls[1][0]
     assert events[0][0] == 'pr5_task_io_import_invalid'
 
 
