@@ -8,6 +8,7 @@ import hashlib
 import http.server
 import json
 import os
+import re
 from pathlib import Path
 import secrets
 import shutil
@@ -54,6 +55,47 @@ def windows_path(path):
     return (subprocess.check_output(['wslpath','-w',str(path)],text=True).strip()
             if EXE and EXE.lower().endswith('.exe') and os.name!='nt' else str(path))
 
+
+def cli_command(model,effort,schema_path,output):
+    cmd=[EXE,'--no-daemon','-a','never','-c','web_search="disabled"',
+         '-c',f'model_reasoning_effort="{effort}"','exec',
+         '--ignore-user-config','--ephemeral','--skip-git-repo-check',
+         '--sandbox','read-only','--model',model,
+         '--output-schema',windows_path(schema_path),
+         '--output-last-message',windows_path(output),'--json']
+    for feature in ('shell_tool','unified_exec','multi_agent','apps','plugins',
+                    'browser_use','computer_use','view_image'):
+        cmd+=['--disable',feature]
+    return cmd+['-']
+
+
+def failure_category(stdout,stderr):
+    """Classify real CLI errors without retaining task text or credentials."""
+    messages=[stderr]
+    for line in stdout.splitlines():
+        try: item=json.loads(line)
+        except ValueError: continue
+        if item.get('type') in ('error','turn.failed'):
+            messages.append(json.dumps(item))
+    text='\n'.join(messages).lower()
+    patterns=[
+        ('usage_limit',r'usage.limit|rate.limit|insufficient.quota|credit.balance|quota.exceed'),
+        ('cli_arguments',r'unexpected argument|unrecognized option|unknown argument'),
+        ('cli_configuration',r'unknown feature|unrecognized feature|unknown variant|parsing.*override|invalid.*config'),
+        ('response_schema',r'invalid schema|response_format|additionalproperties|maxitems|output.schema'),
+        ('authentication',r'unauthori[sz]ed|not logged|authentication|refresh.token|\b401\b'),
+        ('model_access',r'model.not.found|model[^\n]*(?:not supported|does not exist|do not have access)'),
+        ('sandbox_runtime',r'bubblewrap|bwrap|sandbox|operation not permitted'),
+        ('filesystem',r'permission denied|read.only file system'),
+        ('network',r'network|could not resolve|timed out|failed to send|stream disconnected|\b50[234]\b')]
+    return next((name for name,pattern in patterns if re.search(pattern,text)), 'unclassified_cli_error')
+
+
+class InvocationFailed(RuntimeError):
+    def __init__(self,category):
+        self.category=category
+        super().__init__('Subscription invocation failed: '+category)
+
 class Gateway:
     def __init__(self,args):
         self.args=args; self.count=0; self.key=args.key_file.read_text().strip()
@@ -80,16 +122,7 @@ class Gateway:
             schema_path=where/'response.schema.json';schema_path.write_text(json.dumps(schema))
             effort=body.get('reasoning_effort') or 'high'
             if effort not in ('low','medium','high','max'): effort='high'
-            cmd=[EXE,'--no-daemon','-a','never','-c','web_search="disabled"',
-                 '-c',f'model_reasoning_effort="{effort}"','exec',
-                 '--ignore-user-config','--ephemeral','--skip-git-repo-check',
-                 '--sandbox','read-only','--model',self.args.model,
-                 '--output-schema',windows_path(schema_path),
-                 '--output-last-message',windows_path(output),'--json']
-            for feature in ('shell_tool','unified_exec','multi_agent','apps','plugins',
-                            'browser_use','computer_use','view_image'):
-                cmd+=['--disable',feature]
-            cmd+=['-']
+            cmd=cli_command(self.args.model,effort,schema_path,output)
             payload={k:body[k] for k in ('messages','tools','tool_choice') if k in body}
             proc=subprocess.run(cmd,input=PREFIX+json.dumps(payload,ensure_ascii=False),
                 text=True,encoding='utf8',errors='replace',capture_output=True,
@@ -105,10 +138,10 @@ class Gateway:
                     raise ValueError('Native tool used outside FBS')
                 if item.get('type')=='turn.completed': usage=item.get('usage',{})
             if proc.returncode or not output.exists():
-                # Keep diagnostic text local; avoid logging SDK credential-bearing errors.
+                category=failure_category(proc.stdout,proc.stderr)
                 self.event({'event':'call_failed','call':count,'returncode':proc.returncode,
-                            'elapsed_sec':round(time.monotonic()-started,2)})
-                raise RuntimeError('Subscription CLI failed; no model result')
+                            'category':category,'elapsed_sec':round(time.monotonic()-started,2)})
+                raise InvocationFailed(category)
             raw=output.read_text(encoding='utf8')
             try: answer=json.loads(raw)
             except ValueError:
@@ -174,6 +207,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 'message':str(exc)[:160]})
             self.send(503,{'error':{'message':'Subscription result validation failed; retry',
                 'type':'server_error'}})
+        except InvocationFailed as exc:
+            status=429 if exc.category=='usage_limit' else 400
+            if exc.category in ('network','unclassified_cli_error'):status=503
+            self.send(status,{'error':{'message':str(exc),'type':exc.category}})
         except Exception as exc:
             self.server.gateway.event({'event':'gateway_error','error_type':type(exc).__name__})
             self.send(503,{'error':{'message':'Local subscription invocation failed','type':'server_error'}})

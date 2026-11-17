@@ -6,6 +6,11 @@ engine; FBS executes the advertised tools through the official PLE protocol.
 It does not replay a solution or have an operator supply model responses.
 
 The cloud job installs pinned Codex CLI, uv, Harbor and the official PLE kit.
+It first validates the Linux CLI argument shape without a model call. After
+Codex authorization it requests one short subscription response before asking
+for dataset login or building an engineering task. Failed invocations record
+only a fixed diagnostic category (quota, login, configuration, schema, network,
+runtime or unknown), never raw provider errors, task text or credentials.
 It requests two official device authorizations: the ChatGPT subscription and
 the Hugging Face account approved for the gated dataset. No paid model API key
 is required. Authorize in the two named Actions steps. Ephemeral runners require

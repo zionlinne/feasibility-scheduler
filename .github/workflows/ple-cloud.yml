@@ -46,6 +46,8 @@ jobs:
           git clone https://github.com/google-research/ple.git "$PLE_KIT"
           git -C "$PLE_KIT" checkout 8320f0402fdca9f42476607f72bcfd5271cd50c9
           docker info --format '{{.ServerVersion}}'
+      - name: Validate Linux CLI invocation without calling a model
+        run: python cloud/check_subscription.py --cli-only
       - name: Authorize Codex subscription with official device login
         shell: bash
         run: |
@@ -53,13 +55,6 @@ jobs:
           echo 'Open this step and complete the official ChatGPT device authorization shown below.'
           codex login --device-auth
           codex login status
-      - name: Authorize approved Hugging Face account
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo 'Use the Hugging Face account approved for google/physical-engineerings-last-exam.'
-          hf auth login --format agent
-          hf auth whoami
       - name: Start private subscription decision gateway
         shell: bash
         run: |
@@ -83,6 +78,15 @@ jobs:
           (root/'model.env').write_text('MODEL_API_KEY='+token+'\n')
           (root/'model.env').chmod(0o600)
           PY
+      - name: Verify one subscription response before downloading the task
+        run: python cloud/check_subscription.py
+      - name: Authorize approved Hugging Face account
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'Use the Hugging Face account approved for google/physical-engineerings-last-exam.'
+          hf auth login --format agent
+          hf auth whoami
       - name: Run representative task with the actual PR5 FBS runner
         shell: bash
         run: |
