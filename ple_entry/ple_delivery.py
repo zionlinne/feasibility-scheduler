@@ -91,7 +91,7 @@ OUTPUT_SECTION = re.compile(
     re.I,
 )
 OUTPUT_ACTION = re.compile(
-    r'\b(?:create|produce|generate|write|save|export|deliver|submit|provide|prepare)\b',
+    r'\b(?:create|produce|generate|write|save|export|deliver|submit|provide|prepare|include|attach)\b',
     re.I,
 )
 LIST_LINE = re.compile(r'^\s*(?:[-*+] |\d+[.)] |\|)')
