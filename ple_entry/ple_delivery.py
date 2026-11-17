@@ -125,7 +125,7 @@ def _output_file_mentions(instruction):
         candidates += re.findall(
             r'(?<![A-Za-z0-9_-])((?:/[A-Za-z0-9_.-]+)*/[A-Za-z0-9_.-]+|[A-Za-z0-9][A-Za-z0-9_.-]*)\.(?:' +
             '|'.join(sorted((s.lstrip('.') for s in OUTPUT_SUFFIXES), key=len, reverse=True)) +
-            r'))\b',
+            r')\b',
             stripped,
             re.I,
         )
