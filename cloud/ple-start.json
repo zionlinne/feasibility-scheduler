@@ -1,7 +1,0 @@
-{
-  "task": "mv-conveyance-study",
-  "mode": "api-encrypted-upload",
-  "protocol_fix": "af240aa135c1d18b07083f2225a1fd6ec3e2a43a",
-  "launch_attempt": 6,
-  "reason": "Different engineering domain: 13.8 kV electrical conveyance study; unchanged FBS and model"
-}
