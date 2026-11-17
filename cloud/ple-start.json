@@ -1,6 +1,6 @@
 {
   "task": "mv-conveyance-study",
   "mode": "api-encrypted-upload",
-  "launch_attempt": 7,
-  "reason": "Fresh electrical task run with up to five PR5 contract corrections and Root review findings"
+  "launch_attempt": 8,
+  "reason": "Restart after task output import failed before planning; retain five correction rounds"
 }
