@@ -87,14 +87,14 @@ OUTPUT_SUFFIXES = {
     '.xls', '.xlsm', '.xlsx', '.xml', '.yaml', '.yml', '.zip',
 }
 OUTPUT_SECTION = re.compile(
-    r'\\b(?:deliverables?|required outputs?|output files?|submission contents?|files to submit)\\b',
+    r'\b(?:deliverables?|required outputs?|output files?|submission contents?|files to submit)\b',
     re.I,
 )
 OUTPUT_ACTION = re.compile(
-    r'\\b(?:create|produce|generate|write|save|export|deliver|submit|provide|prepare)\\b',
+    r'\b(?:create|produce|generate|write|save|export|deliver|submit|provide|prepare)\b',
     re.I,
 )
-LIST_LINE = re.compile(r'^\\s*(?:[-*+] |\\d+[.)] |\\|)')
+LIST_LINE = re.compile(r'^\s*(?:[-*+] |\d+[.)] |\|)')
 
 
 def _output_file_mentions(instruction):
@@ -117,15 +117,15 @@ def _output_file_mentions(instruction):
             in_output_list = True
         elif in_output_list and not LIST_LINE.match(line) and not is_output_line:
             in_output_list = False
-        if not (is_output_line or in_output_list or LIST_LINE.match(line) and in_output_list):
+        if not (is_output_line or in_output_list):
             continue
         # Backticked paths/names are the least ambiguous form.
-        candidates = re.findall(r'`([^\\`]+\\.[A-Za-z0-9]+)`', stripped)
+        candidates = re.findall(r'\x60([^\x60]+\.[A-Za-z0-9]+)\x60', stripped)
         # Also accept plain filenames in bullets such as "Excel workbook: report.xlsx".
         candidates += re.findall(
-            r'(?<![A-Za-z0-9_./-])([A-Za-z0-9][A-Za-z0-9_.-]*\\.(?:' +
+            r'(?<![A-Za-z0-9_./-])([A-Za-z0-9][A-Za-z0-9_.-]*\.(?:' +
             '|'.join(sorted((s.lstrip('.') for s in OUTPUT_SUFFIXES), key=len, reverse=True)) +
-            r'))\\b',
+            r'))\b',
             stripped,
             re.I,
         )
@@ -143,9 +143,9 @@ def declared_package(instruction, root):
     Ambiguous or incomplete package declarations fall back to the model importer.
     """
     archive_paths = list(dict.fromkeys(re.findall(
-        r'(/[\\w./-]+/output/[\\w.-]+\\.zip)\\b', instruction, re.I)))
+        r'(/[\w./-]+/output/[\w.-]+\.zip)\b', instruction, re.I)))
     names = list(dict.fromkeys(re.findall(
-        r'\\|\\s*`([^`]+\\.[a-zA-Z0-9]+)`\\s*\\|', instruction)))
+        r'\|\s*\x60([^\x60]+\.[a-zA-Z0-9]+)\x60\s*\|', instruction)))
     if not names:
         names = _output_file_mentions(instruction)
     if len(archive_paths) != 1 or not names:
