@@ -30,7 +30,7 @@ class RewriteCandidate:
     """一次候选改图。"""
 
     candidate_id: str
-    kind: str  # keep | split | merge
+    kind: str  # keep | split | merge | recovery_split
     reason: str
     score: float
     # 应用后完整任务列表（含未改动的任务）
@@ -57,7 +57,9 @@ class RewriteCandidate:
 def _tokens(task: Task) -> int:
     raw = task.payload.get("estimated_tokens") if task.payload else None
     if isinstance(raw, (int, float)) and raw >= 0:
-        return int(raw)
+        from .modular_standard import functional_mode
+        context = task.payload.get("request_cost", {}).get("estimated_input_tokens", 0) if functional_mode(task) else 0
+        return int(raw) + context
     owned = _owned(task)
     # 无估计时按文件数给弱先验，避免全 0
     return max(500, 800 * max(1, len(owned)))
@@ -96,7 +98,7 @@ def _mutable_ids(
     out: set[str] = set()
     for task in tasks:
         st = states.get(task.id, "PENDING")
-        if st not in frozen:
+        if st not in frozen and not task.payload.get("contract_integration"):
             out.add(task.id)
     return out
 
@@ -174,7 +176,8 @@ def _validate_or_none(tasks: Sequence[Task]) -> tuple[Task, ...] | None:
             if key in seen:
                 return None
             seen.add(key)
-    return tuple(tasks)
+    from .contract_plan import refresh_contracts
+    return tuple(refresh_contracts(tasks))
 
 
 def _cover_files(tasks: Sequence[Task]) -> set[str]:
@@ -192,7 +195,7 @@ def _keep_candidate(tasks: Sequence[Task]) -> RewriteCandidate:
         reason="保持当前 DAG，不做拆合",
         score=0.0,
         tasks=tuple(tasks),
-        details={"action": "keep"},
+        details={"action": "keep", "estimated_benefit": 0.0, "estimated_cost": 1.0},
     )
 
 
@@ -206,6 +209,13 @@ def _merge_pair(
     """合并两个未领取、文件不交叠的真实模块。"""
     owned_l = _owned(left)
     owned_r = _owned(right)
+    if left.payload.get("disable_merge") or right.payload.get("disable_merge"):
+        return None
+    from .modular_standard import merge_allowed
+    if not merge_allowed(left, right):
+        return None
+    if left.payload.get("contract_hash") != right.payload.get("contract_hash"):
+        return None
     if not owned_l or not owned_r:
         return None
     set_l = {p.replace("\\", "/") for p in owned_l}
@@ -243,6 +253,10 @@ def _merge_pair(
     # prompt 由调用方在 apply 后统一重写；此处先占位保留 left 的 prompt 结构标记
     payload = dict(merged.payload)
     payload["merged_from"] = [left.id, right.id]
+    if payload.get("contract_hash"):
+        payload["contract_module_ids"] = sorted(set(
+            left.payload["contract_module_ids"] + right.payload["contract_module_ids"]
+        ))
     payload["prompt_text"] = (
         f"[REWRITE-MERGE] Implement modules {left.id} + {right.id} together.\n"
         f"owned_files={merged_owned}\n"
@@ -297,6 +311,8 @@ def _merge_pair(
             "merged_id": merged_id,
             "owned_files": merged_owned,
             "tokens": [tokens_l, tokens_r],
+            "estimated_benefit": delta_u,
+            "estimated_cost": delta_c,
         },
     )
 
@@ -306,26 +322,38 @@ def _split_module(
     task: Task,
     *,
     serial: int,
+    recovery: bool = False,
 ) -> RewriteCandidate | None:
     """按 owned_files 真拆：每个源码文件一个子任务；禁止空拆 / 改名假拆。"""
     owned = _owned(task)
     code_files = [p for p in owned if _is_code_file(p)]
     other_files = [p for p in owned if not _is_code_file(p)]
+    from .modular_standard import functional_mode
+    functional = functional_mode(task)
+    if functional and not recovery:
+        return None
+    partitions = [[p] + (list(other_files) if idx == 0 else []) for idx, p in enumerate(code_files)]
+    if functional:
+        catalog = task.payload.get("module_ownership", {})
+        partitions = [sorted(set(catalog.get(mid, ())).intersection(owned))
+                      for mid in task.payload.get("contract_module_ids", ())]
+        if (len(partitions) < 2 or any(not p for p in partitions)
+                or sum(map(len, partitions)) != len(owned)
+                or {p for part in partitions for p in part} != set(owned)):
+            return None
     # 至少 2 个源码文件才允许拆；说明文件附着到第一个子任务，不单独假拆
-    if len(code_files) < 2:
+    if len(partitions) < 2:
         return None
 
     children: list[Task] = []
     child_ids: list[str] = []
     tokens_total = _tokens(task)
-    per = max(1, tokens_total // len(code_files))
-    for idx, path in enumerate(code_files):
+    per = max(1, tokens_total // len(partitions))
+    for idx, files in enumerate(partitions):
+        path = files[0]
         cid = f"{task.id}__f{idx}_{_slug(path)}"
         if any(t.id == cid for t in tasks):
             cid = f"{cid}_{serial}"
-        files = [path]
-        if idx == 0 and other_files:
-            files = [path] + list(other_files)
         child = _clone_task(
             task,
             new_id=cid,
@@ -364,8 +392,8 @@ def _split_module(
         return None
 
     # 重模块多文件拆分：并行收益高
-    delta_u = float(len(code_files)) + (2.0 if tokens_total > LIGHT_TOKEN_THRESHOLD else 0.5)
-    delta_c = 1.0 + 0.25 * len(code_files)  # 协调开销
+    delta_u = float(len(partitions)) + (2.0 if tokens_total > LIGHT_TOKEN_THRESHOLD else 0.5)
+    delta_c = 1.0 + 0.25 * len(partitions)  # Same formula, functional units are the scored objects.
     score = delta_u / delta_c
 
     return RewriteCandidate(
@@ -384,6 +412,8 @@ def _split_module(
             "children": child_ids,
             "code_files": code_files,
             "attached_non_code_to": child_ids[0] if other_files else None,
+            "estimated_benefit": delta_u,
+            "estimated_cost": delta_c,
         },
     )
 
@@ -399,6 +429,31 @@ def _slug(path: str) -> str:
     return "".join(out)[:40] or "file"
 
 
+def recover_failed_merge(tasks: Sequence[Task], task: Task) -> RewriteCandidate | None:
+    """Bounded fallback after confirmed server-error exhaustion, not ambiguous timeouts."""
+    if not task.payload.get("merged_from") or task.payload.get("merge_recovery_depth", 0) >= 1:
+        return None
+    split = _split_module(tasks, task, serial=1, recovery=True)
+    if split is None:
+        return None
+    recovered = []
+    for child in split.tasks:
+        if child.id in split.added_ids:
+            child = Task(id=child.id, dependencies=child.dependencies, constraints=child.constraints,
+                         constraints_declared=child.constraints_declared, output_contract=child.output_contract,
+                         payload={**child.payload, "disable_merge": True, "merge_recovery_depth": 1,
+                                  "recovered_from": task.id})
+        recovered.append(child)
+    after = _validate_or_none(recovered)
+    if after is None:
+        return None
+    return RewriteCandidate(candidate_id=f"recover-split:{task.id}", kind="recovery_split", reason="合并任务请求失败耗尽，按文件拆回并禁止重新合并",
+                            score=split.score, tasks=after, removed_ids=split.removed_ids, added_ids=split.added_ids,
+                            details={"failed_parent": task.id, "bounded_recovery": True,
+                                     "estimated_benefit": split.details["estimated_benefit"],
+                                     "estimated_cost": split.details["estimated_cost"]})
+
+
 def generate_candidates(
     tasks: Sequence[Task],
     *,
@@ -412,6 +467,30 @@ def generate_candidates(
     mutable_tasks = [by_id[i] for i in sorted(mutable) if i in by_id]
 
     serial = 0
+    for task in mutable_tasks:
+        plan = task.payload.get("contract_plan", {})
+        for proposal in plan.get("decompositions", ()):
+            if proposal["parent"] != task.id:
+                continue
+            declarations = {m["id"]: m for m in plan.get("modules", ())}
+            children = [_clone_task(task, new_id=child["id"], owned_files=child["owned_files"],
+                                    dependencies=tuple(dict.fromkeys(task.dependencies + tuple(
+                                        declarations.get(child["id"], {}).get("execution_dependencies", ())))),
+                                      title=child["postcondition"], estimated_tokens=declarations.get(child["id"], {}).get(
+                                          "estimated_tokens", max(1, _tokens(task))))
+                        for child in proposal["children"]]
+            if any(child.id in by_id for child in children):
+                continue
+            rebuilt = _retarget_deps([t for t in task_list if t.id != task.id] + children,
+                                     mapping={task.id: tuple(c.id for c in children)})
+            after = _validate_or_none(rebuilt)
+            if after is not None and _cover_files(after) == _cover_files(task_list):
+                delta_u, delta_c = float(len(children)), 1.0
+                candidates.append(RewriteCandidate(
+                    candidate_id=f"contract-split:{task.id}", kind="split",
+                    reason="按契约提议的交付物边界拆分并重新投影检查责任", score=delta_u / delta_c,
+                    tasks=after, removed_ids=(task.id,), added_ids=tuple(c.id for c in children),
+                    details={"source": "contract_plan", "estimated_benefit": delta_u, "estimated_cost": delta_c}))
     # merge：轻量 + 文件不交叠
     for i, left in enumerate(mutable_tasks):
         for right in mutable_tasks[i + 1 :]:

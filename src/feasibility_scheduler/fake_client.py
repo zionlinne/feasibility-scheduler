@@ -351,9 +351,11 @@ class ApiResponse:
     finished_at: datetime
     input_artifact_hash: str
     format_repair_used: bool = False
+    diagnostics: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "usage", _freeze_usage(self.usage))
+        object.__setattr__(self, "diagnostics", _freeze_json(self.diagnostics))
         if self.parsed_body is not None:
             object.__setattr__(self, "parsed_body", _freeze_json(self.parsed_body))
 
@@ -402,6 +404,7 @@ class ApiResponse:
             "is_duplicate": self.is_duplicate,
             "duplicate_of": self.duplicate_of,
             "format_repair_used": self.format_repair_used,
+            "diagnostics": dict(self.diagnostics),
         }
 
 
@@ -602,6 +605,7 @@ class FakeClient:
             finished_at=first.finished_at,
             input_artifact_hash=first.input_artifact_hash,
             format_repair_used=first.format_repair_used,
+            diagnostics=first.diagnostics,
         )
         self._responses.append(duplicate)
         return duplicate

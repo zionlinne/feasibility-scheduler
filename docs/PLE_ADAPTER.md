@@ -1,76 +1,39 @@
-# FBS PLE interface prototype
+# PR5 baseline and retained PLE interfaces
 
-This entry wraps Google's existing `plan-verify` tool loop with the existing
-FBS executor. FBS runs locally in the harness container. There is no remote
-scheduler endpoint, human-in-the-loop channel, or DAR dependency.
+This branch copies the complete tracked PR5 snapshot at
+`7630497cdb0b51682488ae14c31c74dce99109c7` without modifying those files.
+PR5 itself is unchanged. Its functional planning, candidate selection, execution,
+acceptance, native client and tests are the baseline here.
 
-The first integration uses a fixed `plan -> work -> verify` DAG, concurrency 1.
-The planner freezes required output paths and executable checks. The worker uses
-the official model/tool loop. Before final acceptance the host runs the frozen
-checks, checks that every planned output is a nonempty regular file, invokes a
-fresh verifier conversation, and compares file hashes before and after review.
-An empty review, missing output, failed command, or changed candidate cannot pass.
+The previous PLE-specific fixed `plan -> work -> verify` DAG, role prompts,
+per-stage time shares, single-attempt policy and their tests have been removed.
+No replacement workflow is introduced.
 
-FBS's plan/work acceptance means that stage's interface contract completed;
-engineering review happens in the final verify stage. The verifier is another
-conversation of the same configured model, not an external professional engineer.
-The planner's coverage and the engineering meaning of its checks remain model
-dependent. This prototype does not establish a PLE score or safety guarantee.
+## Retained interfaces
 
-## Layout
+- `taskbridge.py`: unchanged official WebSocket/session/relay/MCP transport from
+  PLE commit `8320f0402fdca9f42476607f72bcfd5271cd50c9`.
+- `mcp_tools.py`: task-declared MCP discovery/calls and optional read-only access.
+- `serve.py`: thin entrypoint. An explicitly configured async handler,
+  `FBS_PLE_ENTRYPOINT=module:function`, receives the official session unchanged.
+- `submission.yaml`, dependencies, container entry and WebSocket startup check.
 
-- `src/feasibility_scheduler`: existing FBS source, unchanged.
-- `ple_entry/fbs_adapter.py`: local scheduler/client and acceptance adapter.
-- `ple_entry/serve.py`: existing-loop integration and competition startup.
-- `ple_entry/taskbridge.py`, `worker_loop.py`: official PLE bridge/tool loop.
-- `ple_entry/mcp_tools.py`: task-declared MCP tool access through the official bridge.
-- `submission.yaml`: provisional Gemini 3.8 Flash entry; no credentials.
-- `tests/`: scripted adapter, MCP, SDK-loop and real WebSocket transport checks.
+## Time policy
 
-No engineering task data or `artifacts/` are included. Runtime task text and model
-outputs stay in memory; FBS state/audit files use a temporary directory removed
-when the session ends. Persistent telemetry contains generic state names only.
-The upstream sample's log messages are suppressed because they contain tool
-arguments. Final deliverable summaries still go to the official evaluator.
-
-## Check locally
-
-Use Python 3.12 and install `requirements.txt` plus `pytest==8.4.2`.
-
-```sh
-python -m pytest tests/test_ple_adapter.py tests/test_ple_mcp_and_loop.py -q
-```
-
-Those tests use scripted model/task peers. One test uses an actual loopback
-WebSocket and the official bridge; another runs the real official agent loop
-with model responses replaced by test messages. None is a real PLE engineering
-trial or a paid model call.
-
-## Official checks and first public task
-
-In a checkout of `google-research/ple`, with Docker running, the approved dataset
-access and model proxy configured, point the official tools at this entry:
-
-```sh
-uv run python -m kit check /path/to/fbs-ple-entry
-uv run python eval/run.py /path/to/fbs-ple-entry --tasks frame-extension-method
-```
-
-Do not hand-create `artifacts/`. It must be exported by `eval/run.py` and match
-the model declared in `submission.yaml`. Do not include credentials in git.
+This entrypoint adds no planning/worker/reviewer deadline, call limit or attempt
+limit. The official session's total task limit remains authoritative. PR5 source
+is unchanged; configure any PR5 runtime timeout in the eventual adapter against
+the remaining official time instead of changing PR5. The local subscription
+gateway remains outside this repository and is not launched by this entrypoint.
 
 ## Current boundary
 
-This workstation has no Docker executable, configured model proxy/project, or
-dataset token available to the task. Therefore the complete official kit checks,
-model connectivity, public-task run, score, cost and submission readiness have
-not been verified. A specification parse is only configuration validation.
+The PR5 task/material/output/check adapter for PLE is not connected yet.
+Without `FBS_PLE_ENTRYPOINT`, a task raises a configuration error. There is no
+fallback workflow or fabricated acceptance. The entry can listen for an interface
+check but cannot yet solve a PLE task. The manifest retains its Stage 2 model
+and startup configuration; this branch is not ready to submit.
 
-Planner/verifier direct `write_file` is unavailable; MCP calls require an
-explicit read-only annotation for these roles. Their shell access is instructed
-to be read-only but is not an OS permission boundary. Hash comparison detects
-changes to planned outputs during review; it does not cover every task input.
-No automatic revision rounds or recursive replanning are added in this prototype.
-
-For attribution and source revisions, see `PROVENANCE.json` and
-`ple_entry/LICENSE.google`. This adapter does not add a license grant for FBS.
+Cleanup validation is limited to PR5 tracked-file identity and targeted interface
+checks. No full smoke, live model call or engineering task is run. Earlier
+experiments belong to the removed adapter and are not PR5 results.

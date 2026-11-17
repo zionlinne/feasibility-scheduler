@@ -1,15 +1,12 @@
 {
-  "fbs_commit": "a368437360694bd44c5d8fd0bd4dc4be0c4d04a5",
-  "fbs_python_files_unchanged": 23,
+  "fbs_commit": "7630497cdb0b51682488ae14c31c74dce99109c7",
+  "fbs_baseline": "PR5 tracked snapshot, unchanged",
   "ple_commit": "8320f0402fdca9f42476607f72bcfd5271cd50c9",
   "reused_files": {
-    "taskbridge.py": "2f15766091ff1be44d58128d690177c7756c75e06650a46f706533e6b31b12a6",
-    "worker_loop.py": "9aaa472e76dae37486e234204f02920f3e2bcd0358ef7e88de2aa0444e3119cb"
+    "taskbridge.py": "2f15766091ff1be44d58128d690177c7756c75e06650a46f706533e6b31b12a6"
   },
   "model": "google-cloud/gemini-3.8-flash",
   "dar_required": false,
-  "live_model_calls": 0,
-  "public_engineering_tasks_run": 0,
-  "official_full_kit_check": "not_run",
-  "official_submission_schema": "passed"
+  "status": "interfaces retained; PR5 task adapter not connected",
+  "cleanup_validation": "no live model calls or engineering runs"
 }

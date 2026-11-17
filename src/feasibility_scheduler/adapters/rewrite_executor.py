@@ -17,12 +17,13 @@ from feasibility_scheduler.statemachine import TaskState
 from feasibility_scheduler.validation import validate_tasks
 
 from .artifact_request import ArtifactMetadataExecutorMixin
-from .graph_rewrite import RewriteCandidate, decide_rewrite
+from .contract_runtime import ContractExecutionMixin
+from .graph_rewrite import RewriteCandidate, decide_rewrite, recover_failed_merge
 
 COMPONENT = "rewrite_adapter"
 
 
-class GraphRewriteExecutor(ArtifactMetadataExecutorMixin, Executor):
+class GraphRewriteExecutor(ContractExecutionMixin, ArtifactMetadataExecutorMixin, Executor):
     """policy=rewrite 时使用；fixed 请继续用 PromptFromPayloadExecutor。
 
     额外覆盖 `_prompt`：与 legacy 适配一致，优先 payload["prompt_text"]。
@@ -78,7 +79,22 @@ class GraphRewriteExecutor(ArtifactMetadataExecutorMixin, Executor):
                 if last.get("kind") == "keep" and last.get("fingerprint") == fp:
                     return None
 
-            selected, all_cands = decide_rewrite(self.tasks, states=states)
+            selected = None
+            # Only recover terminal merged tasks whose last transport outcome is
+            # known server_error. TIMEOUT/UNKNOWN remain under kernel recovery.
+            outcomes = {e.task_id: e.details for e in self.log.events()
+                        if e.type == "api_request_failed" and e.details.get("outcome")}
+            for task in self.tasks:
+                failure = outcomes.get(task.id, {})
+                if (states.get(task.id) == "FAILED" and failure.get("outcome") == "server_error"
+                        and 500 <= failure.get("status_code", 0) <= 599):
+                    selected = recover_failed_merge(self.tasks, task)
+                    if selected is not None:
+                        break
+            if selected is None:
+                selected, all_cands = decide_rewrite(self.tasks, states=states)
+            else:
+                all_cands = [selected]
             for cand in all_cands:
                 self.log.record(
                     "candidate_generated",
