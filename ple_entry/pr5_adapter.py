@@ -43,17 +43,24 @@ def parse_object(text):
 
 async def import_task_spec(worker, prompt, root, event):
     """Import task I/O with one bounded, schema-directed correction attempt."""
-    first = await worker.run(prompt, importing=True)
+    first = None
     try:
+        first = await worker.run(prompt, importing=True)
         return normalize_spec(first, root)
     except (KeyError, TypeError, ValueError) as first_error:
         detail = f'{type(first_error).__name__}: {first_error}'[:500]
+        try:
+            previous = json.dumps(first, ensure_ascii=False)[:6000]
+        except (TypeError, ValueError):
+            previous = repr(first)[:6000]
         event('pr5_task_io_import_invalid', attempt=1, detail=detail)
         correction = (
             prompt
-            + '\n\nYour previous JSON response was rejected by the host validator: '
+            + '\n\nThe previous importer response failed host validation: '
             + detail
-            + '. Re-read only the task brief and referenced output instructions. '
+            + '\nPrevious response (possibly truncated): '
+            + previous
+            + '\nRe-read only the task brief and referenced output instructions. '
               'Return a corrected JSON object matching the required schema. '
               'Declare every explicitly required output file. Use kind=binary for '
               'XLSX, PDF, DOCX and other binary formats; use kind=text for UTF-8 text. '
@@ -62,8 +69,8 @@ async def import_task_spec(worker, prompt, root, event):
               'archive members. An archive may list only files explicitly declared as '
               'deliverables. If the brief is genuinely ambiguous, do not guess.'
         )
-        second = await worker.run(correction, importing=True)
         try:
+            second = await worker.run(correction, importing=True)
             return normalize_spec(second, root)
         except (KeyError, TypeError, ValueError) as second_error:
             event('pr5_task_io_import_failed', attempt=2,
