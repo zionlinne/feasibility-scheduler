@@ -80,19 +80,94 @@ def normalize_spec(value, root):
     return {'root': root, 'files': files, 'archives': archives}
 
 
-def declared_package(instruction, root):
-    """Fast import only for an explicit single archive plus a named file table.
+OUTPUT_SUFFIXES = {
+    '.csv', '.doc', '.docx', '.dwg', '.dxf', '.html', '.ifc', '.jpeg',
+    '.jpg', '.json', '.md', '.odp', '.ods', '.odt', '.pdf', '.png',
+    '.ppt', '.pptx', '.py', '.rtf', '.tex', '.toml', '.tsv', '.txt',
+    '.xls', '.xlsm', '.xlsx', '.xml', '.yaml', '.yml', '.zip',
+}
+OUTPUT_SECTION = re.compile(
+    r'\\b(?:deliverables?|required outputs?|output files?|submission contents?|files to submit)\\b',
+    re.I,
+)
+OUTPUT_ACTION = re.compile(
+    r'\\b(?:create|produce|generate|write|save|export|deliver|submit|provide|prepare)\\b',
+    re.I,
+)
+LIST_LINE = re.compile(r'^\\s*(?:[-*+] |\\d+[.)] |\\|)')
 
-    Other briefs use a model I/O import, then the same PR5 runner. No task IDs.
+
+def _output_file_mentions(instruction):
+    """Extract filenames only from explicit output instructions/lists.
+
+    This is deliberately conservative: references in source-material sections are
+    not treated as deliverables merely because they have a familiar extension.
     """
-    archives = list(dict.fromkeys(re.findall(r'(/[^\s`<>]+/output/[^\s`<>]+\.zip)', instruction)))
-    names = list(dict.fromkeys(re.findall(r'\|\s*`([^`]+\.[a-zA-Z0-9]+)`\s*\|', instruction)))
-    if len(archives) != 1 or not names:
+    found = []
+    in_output_list = False
+    for line in instruction.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith('#'):
+            in_output_list = bool(OUTPUT_SECTION.search(stripped))
+            continue
+        is_output_line = bool(OUTPUT_ACTION.search(stripped) or OUTPUT_SECTION.search(stripped))
+        if OUTPUT_SECTION.search(stripped):
+            in_output_list = True
+        elif in_output_list and not LIST_LINE.match(line) and not is_output_line:
+            in_output_list = False
+        if not (is_output_line or in_output_list or LIST_LINE.match(line) and in_output_list):
+            continue
+        # Backticked paths/names are the least ambiguous form.
+        candidates = re.findall(r'`([^\\`]+\\.[A-Za-z0-9]+)`', stripped)
+        # Also accept plain filenames in bullets such as "Excel workbook: report.xlsx".
+        candidates += re.findall(
+            r'(?<![A-Za-z0-9_./-])([A-Za-z0-9][A-Za-z0-9_.-]*\\.(?:' +
+            '|'.join(sorted((s.lstrip('.') for s in OUTPUT_SUFFIXES), key=len, reverse=True)) +
+            r'))\\b',
+            stripped,
+            re.I,
+        )
+        for candidate in candidates:
+            suffix = PurePosixPath(candidate).suffix.lower()
+            if suffix in OUTPUT_SUFFIXES and candidate not in found:
+                found.append(candidate)
+    return found
+
+
+def declared_package(instruction, root):
+    """Fast-path an explicitly declared ZIP package and its named output files.
+
+    Supports both Markdown output tables and natural-language deliverable lists.
+    Ambiguous or incomplete package declarations fall back to the model importer.
+    """
+    archive_paths = list(dict.fromkeys(re.findall(
+        r'(/[\\w./-]+/output/[\\w.-]+\\.zip)\\b', instruction, re.I)))
+    names = list(dict.fromkeys(re.findall(
+        r'\\|\\s*`([^`]+\\.[a-zA-Z0-9]+)`\\s*\\|', instruction)))
+    if not names:
+        names = _output_file_mentions(instruction)
+    if len(archive_paths) != 1 or not names:
         return None
-    parent = str(PurePosixPath(archives[0]).parent)
-    files = [{'path': clean_path(n, parent), 'kind': 'text' if PurePosixPath(n).suffix.lower() in TEXT_SUFFIXES else 'binary'} for n in names]
-    return normalize_spec({'files': files, 'archives': [{'path': archives[0],
-        'members': {n: clean_path(n, parent) for n in names}}]}, root)
+
+    archive = clean_path(archive_paths[0], root)
+    parent = str(PurePosixPath(archive).parent)
+    files = []
+    members = {}
+    for name in names:
+        if PurePosixPath(name).suffix.lower() == '.zip':
+            continue
+        path = clean_path(name, parent)
+        kind = 'text' if PurePosixPath(name).suffix.lower() in TEXT_SUFFIXES else 'binary'
+        files.append({'path': path, 'kind': kind})
+        member = PurePosixPath(name).name if PurePosixPath(name).is_absolute() else PurePosixPath(name).as_posix()
+        if member in members:
+            return None
+        members[member] = path
+    if not files:
+        return None
+    return normalize_spec({'files': files, 'archives': [{'path': archive, 'members': members}]}, root)
 
 
 class EvidenceSession:
