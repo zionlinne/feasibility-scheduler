@@ -123,7 +123,7 @@ def _output_file_mentions(instruction):
         candidates = re.findall(r'\x60([^\x60]+\.[A-Za-z0-9]+)\x60', stripped)
         # Also accept plain filenames in bullets such as "Excel workbook: report.xlsx".
         candidates += re.findall(
-            r'(?<![A-Za-z0-9_./-])([A-Za-z0-9][A-Za-z0-9_.-]*\.(?:' +
+            r'(?<![A-Za-z0-9_-])((?:/[A-Za-z0-9_.-]+)*/[A-Za-z0-9_.-]+|[A-Za-z0-9][A-Za-z0-9_.-]*)\.(?:' +
             '|'.join(sorted((s.lstrip('.') for s in OUTPUT_SUFFIXES), key=len, reverse=True)) +
             r'))\b',
             stripped,
