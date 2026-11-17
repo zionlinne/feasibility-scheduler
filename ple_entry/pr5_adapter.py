@@ -1,9 +1,7 @@
 """PLE transport around PR5's unchanged native runner and acceptance hooks."""
 from __future__ import annotations
 import asyncio
-import csv
 import hashlib
-import io
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -13,21 +11,12 @@ import tempfile
 
 from feasibility_scheduler.adapters.legacy_doc import LegacyDocConfig, run_legacy_doc
 from mcp_tools import TaskMcpTools, TOOLS as MCP_TOOLS
+from ple_delivery import (Delivery, EvidenceSession, declared_package, first_reads,
+                          normalize_spec, task_root)
 
 
 def event(kind, **values):
     print(json.dumps({'event':kind,**values}),flush=True)
-
-
-def output_spec(instruction):
-    archives=re.findall(r'(/[^\s`<>]+/output/[^\s`<>]+\.zip)',instruction)
-    files=list(dict.fromkeys(re.findall(r'\|\s*`([^`/]+\.(?:csv|json|md|txt))`\s*\|',instruction)))
-    if not archives or not files:
-        raise ValueError('This adapter needs a declared ZIP output and a named text-file table')
-    for name in files:
-        if PurePosixPath(name).name!=name or '..' in name or '\\' in name:
-            raise ValueError('Invalid output name')
-    return archives[0],files
 
 
 def parse_object(text):
@@ -78,14 +67,16 @@ WRITE_TOOL=tool('write_file',{'path':{'type':'string'},'content':{'type':'string
 
 
 class ModelWorker:
-    def __init__(self,session):
+    def __init__(self,session,delivery=None):
         from openai import AsyncOpenAI
         self.session=session
         self.client=AsyncOpenAI(max_retries=3,timeout=max(1,session.time_left() or 21600))
         self.model=os.environ['MODEL_NAME']
+        self.delivery=delivery
 
-    async def run(self,prompt,*,planning=False,review=False):
-        rules=('You execute a request dispatched by the existing PR5 FBS harness. '
+    async def run(self,prompt,*,planning=False,review=False,importing=False):
+        rules=(('You import task I/O for the PR5 adapter. ' if importing else
+                'You execute a request dispatched by the existing PR5 FBS harness. ')+
           'Follow its current contract, ownership, checks and output JSON schema. '
           'This is a physical-engineering task; software-specific examples are protocol examples. '
           'Use supplied engineering libraries inside the task container for calculations. '
@@ -94,9 +85,19 @@ class ModelWorker:
           'The original task documents are available through the official task tools. '
           'Return exactly the requested JSON object, without Markdown. '
           'Do not ask the operator to do work or create a separate planning workflow. ')
-        if planning:
+        if importing:
+            rules+=('Import task I/O only; do not solve or design a workflow. Read the brief and '
+                    'only the referenced material needed to identify actual requested outputs. '
+                    'Return {"files":[{"path":"absolute task-container path","kind":"text|binary|final_message"}],'
+                    '"archives":[{"path":"absolute ZIP path","members":{"archive/member":"absolute source file path"}}]}. '
+                    'Use kind=text for UTF-8 outputs, binary for office/CAD/PDF/image/archive files written '
+                    'by tools, and final_message when a substantive final response or MCP-side-effect summary '
+                    'is required. final_message needs no path. archives is ONLY for a package whose full '
+                    'member set the brief explicitly declares; otherwise declare the archive as a binary file. '
+                    'Do not include input/reference files as outputs. Never invent required files. ')
+        elif planning:
             rules+=('This is PR5 contract generation, not solving the engineering problem. '
-                    'All small source documents are provided below. Use that material and return '
+                    'Collected small text source documents are provided below. Use that material and return '
                     'the contract in one response; leave design calculations to dispatched work units. '
                     'Registered host checker ple-format checks delivery parsing only. Registered host '
                     'checker ple-root-review is a fresh model review that inspects actual files and '
@@ -105,6 +106,22 @@ class ModelWorker:
             rules+=('PR5 contract paths MUST use the exact canonical relative names in MODULES. '
                     'Absolute paths in TASK describe the remote environment, not contract paths. '
                     'Provided-material check paths use their exact registered provided/ names. ')
+            rules+=('The host also registers ple-package-evidence: at acceptance it publishes current '
+                    'FBS text outputs, packages declared archive members, independently checks member '
+                    'names and SHA-256 against the current files at the exact requested destination, '
+                    'checks host preloading read order and reports the first complete candidate host '
+                    'operation. The runtime attempts early packaging after worker tool operations; '
+                    'the approximate step milestone is an advisory target, not proof of a particular '
+                    'official step count. These future acceptance procedures are available before work '
+                    'starts; a final output need not already exist. '
+                    'Missing hidden evaluation indexes, held-out selections or certified optimum bounds '
+                    'that TASK explicitly says are unavailable by design are not missing execution inputs. '
+                    'Keep all public thresholds and engineering obligations; pursue them using the public '
+                    'corpus. Record inability to certify exact hidden recall, score or optimality in '
+                    'acceptance_limitations and handoff. Grading-method descriptions do not create a '
+                    'requirement for the host to certify an unavailable hidden score before starting. '
+                    'Real missing mandatory inputs, unavailable tools or uncovered public mandatory '
+                    'acceptance obligations remain blocking questions in unresolved. Never erase them. ')
         elif review:
             rules+=('This is the host Root checker invoked by PR5. Inspect actual delivered files '
                     'and recompute relevant quantities with tools. Do not modify files. '
@@ -113,8 +130,24 @@ class ModelWorker:
             rules+=('Compute using task tools, then deliver ALL current owned files as complete '
                     'text contents in the PR5 files map. Its keys MUST be the exact relative owned_files '
                     'names, not absolute remote paths. Do not replace files with paths or summaries. ')
-        tools=[] if planning else READ_TOOLS+([] if review else [WRITE_TOOL])+MCP_TOOLS
-        router=TaskMcpTools(self.session,readonly=review)
+        if self.delivery is not None:
+            rules+='\nHOST TASK DELIVERY MAP (read-only): '+json.dumps(self.delivery.spec)+'\n'
+            rules+=('For kind=binary, generate the real file inside the task container using tools. '
+                    'Its owned receipt artifact is a JSON text file: return its full JSON text in files '
+                    'with at least {"path":"the declared remote path"}; the host captures actual size/hash '
+                    'from disk before passing the receipt to PR5. A receipt is transport evidence only, '
+                    'not proof of format or engineering validity. Include any generation script text and '
+                    'reproduction command in the receipt when feasible. Never put binary bytes into a '
+                    'UTF-8 files value. For kind=text, deliver the actual complete text, and write an early '
+                    'version to its declared remote output path as soon as it is complete. '
+                    'Modify only remote outputs mapped from your current owned_files or repair_files; '
+                    'the full delivery map grants no permission to overwrite another module output. '
+                    'The host owns only the packaging of archives explicitly listed in archives. '
+                    'Engineering review must independently verify every required deliverable, all '
+                    'unknown format checks, and the completeness of this I/O map against the original '
+                    'task; omissions or invented requirements fail review. ')
+        tools=[] if planning else READ_TOOLS+([] if review or importing else [WRITE_TOOL])+MCP_TOOLS
+        router=TaskMcpTools(self.session,readonly=review or importing)
         messages=[{'role':'system','content':rules},{'role':'user','content':prompt}]
         operations=0
         while True:
@@ -140,67 +173,76 @@ class ModelWorker:
                 try:
                     if fn.name=='bash': result=await self.session.exec(args['command'],timeout_sec=args['timeout_sec'])
                     elif fn.name=='read_file':
-                        result={'content':(await self.session.read_file(args['path'])).decode('utf8')}
+                        data=await self.session.read_file(args['path'])
+                        try: result={'content':data.decode('utf8')}
+                        except UnicodeError:
+                            result={'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest(),
+                                    'detail':'Binary input: use task bash or MCP to parse/inspect it; this text is not its content'}
                     elif fn.name=='write_file' and not review:
                         result={'bytes':await self.session.write_file(args['path'],args['content'])}
                     elif fn.name in ('task_mcp_tools','task_mcp_call'):
                         result=await router.run({'name':fn.name,'arguments':fn.arguments})
                     else: raise ValueError('Tool not available')
                 except Exception as exc:
-                    result={'error_type':type(exc).__name__}
+                    result={'error_type':type(exc).__name__,'detail':str(exc)[:1000]}
+                if self.delivery is not None and not review and not importing and fn.name in ('bash','write_file','task_mcp_call'):
+                    try:
+                        evidence=await self.delivery.checkpoint()
+                        result={'tool_result':result,'complete_delivery_on_disk':evidence['complete']}
+                    except Exception as exc:
+                        result={'tool_result':result,'delivery_checkpoint_error':type(exc).__name__}
                 text=json.dumps(result,ensure_ascii=False)
                 if len(text)>80000: text=text[:40000]+'\n[truncated; read smaller sections]\n'+text[-40000:]
                 messages.append({'role':'tool','tool_call_id':call.id,'content':text})
 
 
-async def source_materials(session,root):
+async def source_materials(session,root,initial_reads=()):
+    references={}
+    for name in initial_reads:
+        relative=PurePosixPath(name).relative_to(root).as_posix()
+        references['provided/'+relative]=(await session.read_file(name)).decode('utf8')
+    if root=='/':
+        return references  # No project root was declared: never crawl the OS filesystem.
     program=('import json,pathlib; p=pathlib.Path('+repr(root)+'); '
       'print(json.dumps([str(x) for x in p.rglob("*") if x.is_file() '
       'and x.suffix.lower() in (".csv",".md",".json",".txt") and x.stat().st_size<131072 '
       'and not set(x.relative_to(p).parts)&{"output","tests","solutions","verifier",".git"}]))')
     result=await session.exec('python3 -c '+shlex.quote(program))
     if result.get('exit_code')!=0: raise ValueError('Could not list supplied material')
-    references={}
     for name in json.loads(result['output']):
         relative=PurePosixPath(name).relative_to(root).as_posix()
         if relative=='task.md': continue
+        if 'provided/'+relative in references: continue
         references['provided/'+relative]=(await session.read_file(name)).decode('utf8')
     return references
 
 
-def format_check(workspace,names):
-    for name in names:
-        p=workspace/name
-        if not p.is_file() or p.is_symlink() or not p.stat().st_size:
-            return {'status':'failed','detail':'Missing/nonregular output: '+name}
-        text=p.read_text(encoding='utf8')
-        if p.suffix=='.json': json.loads(text)
-        if p.suffix=='.csv':
-            rows=list(csv.reader(io.StringIO(text)))
-            if len(rows)<2 or not rows[0] or any(len(r)!=len(rows[0]) for r in rows[1:]):
-                return {'status':'failed','detail':'Malformed/empty CSV: '+name}
-    return {'status':'passed','detail':'Text/CSV/JSON delivery syntax only; engineering checked separately'}
-
-
-async def publish(session,workspace,names,archive):
-    output=str(PurePosixPath(archive).parent)
-    for name in names:
-        await session.write_file(output+'/'+name,(workspace/name).read_bytes())
-    program=('import pathlib,zipfile; p=pathlib.Path('+repr(output)+'); '
-      'z=zipfile.ZipFile('+repr(archive)+',"w",zipfile.ZIP_DEFLATED); '
-      '[z.write(p/n,n) for n in '+repr(names)+']; z.close()')
-    result=await session.exec('python3 -c '+shlex.quote(program))
-    if result.get('exit_code')!=0: raise ValueError('ZIP packaging failed')
-
-
 async def solve(session):
-    archive,names=output_spec(session.instruction)
-    root=str(PurePosixPath(archive).parent.parent)
-    task_source=(await session.read_file(root+'/task.md')).decode('utf8')
-    references=await source_materials(session,root)
-    aliases={str(PurePosixPath(archive).parent/name):name for name in names}
+    session=EvidenceSession(session)
+    root=task_root(session.instruction,session.workdir)
+    required_reads=[]
+    task_source=session.instruction
+    if re.search(r'\bread\s+`task\.md`',session.instruction,re.I):
+        task_path=str(PurePosixPath(root)/'task.md')
+        task_source=(await session.read_file(task_path)).decode('utf8')
+        required_reads.append(task_path)
+    initial_reads=first_reads(task_source,root)
+    required_reads+=initial_reads
+    references=await source_materials(session,root,initial_reads)
+    worker=ModelWorker(session)
+    spec=declared_package(session.instruction+'\n'+task_source,root)
+    if spec is None:
+        event('pr5_task_io_import_started')
+        imported=await worker.run('Task root: '+root+'\n'+session.instruction+'\n'+task_source,
+                                  importing=True)
+        spec=normalize_spec(imported,root)
+        event('pr5_task_io_import_finished',files=len(spec['files']),archives=len(spec['archives']))
+    delivery=Delivery(session,spec,required_reads,event)
+    names=delivery.names
+    aliases=delivery.aliases
     aliases.update({str(PurePosixPath(root)/name.removeprefix('provided/')):name for name in references})
-    worker=ModelWorker(session);loop=asyncio.get_running_loop()
+    worker.delivery=delivery
+    loop=asyncio.get_running_loop()
     with tempfile.TemporaryDirectory(prefix='pr5-ple-') as temporary:
         directory=Path(temporary);bridge=directory/'native';bridge.mkdir()
         source=directory/'source';source.mkdir()
@@ -208,22 +250,25 @@ async def solve(session):
         profile={'id':'ple-engineering-v1','categories':[
           {'id':'delivery','description':'Required files are complete and parseable','applicable':True,
            'allowed_kinds':['file_exists','text_contains','json_equals','json_match','external'],
-           'checker_names':['ple-format','ple-root-review']},
+           'checker_names':['ple-format','ple-package-evidence','ple-root-review']},
+          {'id':'package_execution','description':'Exact delivery paths, current archive members and actual host execution/read-order evidence',
+           'applicable':True,'allowed_kinds':['external'],'checker_names':['ple-package-evidence']},
           {'id':'engineering','description':'Original engineering obligations and cross-file consistency are substantively checked',
            'applicable':True,'allowed_kinds':['external'],'checker_names':['ple-root-review']}]}
         task_input={'modules':[{'module_id':'submission','title':'Complete the requested engineering package',
           'owned_files':names,'outputs':names,'deps':[],'estimated_tokens':24000}],
-          'reference_files':references,'external_checker_names':['ple-format','ple-root-review'],
+          'reference_files':references,'external_checker_names':['ple-format','ple-package-evidence','ple-root-review'],
           'acceptance_profile':profile}
         (source/'TASK_INPUT.json').write_text(json.dumps(task_input),encoding='utf8')
 
         async def review(workspace):
-            checked=format_check(workspace,names)
+            checked,evidence=await delivery.publish(workspace)
             if checked['status']!='passed': return checked
             before={n:hashlib.sha256((workspace/n).read_bytes()).hexdigest() for n in names}
-            await publish(session,workspace,names,archive)
             event('pr5_root_review_started')
-            prompt=(task_source+'\n\nActual output directory: '+str(PurePosixPath(archive).parent)
+            prompt=(task_source+'\n\nHOST DELIVERY MAP:\n'+json.dumps(spec)
+              +'\nACTUAL EXECUTION/PACKAGING EVIDENCE:\n'+json.dumps(evidence)
+              +'\nACTUAL FBS TEXT ARTIFACTS:\n'+json.dumps({n:(workspace/n).read_text(encoding='utf8') for n in names})
               +'\nInspect all delivered files and verify the task requirements, calculations, constraints, '
                'resource/day consistency and citations from supplied source documents. '
                'Return {"status":"passed|failed|unverified","detail":"specific evidence and defects",'
@@ -237,11 +282,9 @@ async def solve(session):
                 raise ValueError('Root pass does not match its evidence')
             if before!={n:hashlib.sha256((workspace/n).read_bytes()).hexdigest() for n in names}:
                 return {'status':'unverified','detail':'Candidate changed during Root review'}
-            directory=str(PurePosixPath(archive).parent)
-            check=('import json,hashlib,pathlib; p=pathlib.Path('+repr(directory)+'); '
-                   'print(json.dumps({n:hashlib.sha256((p/n).read_bytes()).hexdigest() for n in '+repr(names)+'}))')
-            inspected=await session.exec('python3 -c '+shlex.quote(check))
-            if inspected.get('exit_code')!=0 or json.loads(inspected['output'])!=before:
+            inspected=await delivery.inspect()
+            fingerprint=lambda e:{r['path']:r.get('sha256') for r in e['files']+e['archives']}
+            if fingerprint(inspected)!=fingerprint(evidence):
                 return {'status':'unverified','detail':'Delivered task files changed during Root review'}
             event('pr5_root_review_finished',status=status)
             return {'status':status,'detail':json.dumps(answer,ensure_ascii=False)}
@@ -249,12 +292,17 @@ async def solve(session):
         def root_checker(workspace):
             return asyncio.run_coroutine_threadsafe(review(workspace),loop).result()
 
+        def package_checker(workspace):
+            checked,_=asyncio.run_coroutine_threadsafe(delivery.publish(workspace),loop).result()
+            return checked
+
         remaining=max(1,session.time_left() or 21600)
         cfg=LegacyDocConfig(task_input_path=source/'TASK_INPUT.json',task_md_path=source/'TASK.md',
           workdir=directory/'run',client_kind='native',native_bridge_dir=bridge,
           policy='rewrite',acceptance='loose',timeout_seconds=remaining,lease_seconds=remaining+60,
           acceptance_profile=profile,external_checkers={
-            'ple-format':lambda workspace:format_check(workspace,names),'ple-root-review':root_checker})
+            'ple-format':delivery.local_check,'ple-package-evidence':package_checker,
+            'ple-root-review':root_checker})
         done=asyncio.create_task(asyncio.to_thread(run_legacy_doc,cfg))
         handled=set();active=set();seen_events=set()
 
@@ -267,8 +315,16 @@ async def solve(session):
                 body=await worker.run(request['prompt'],planning=planning)
                 original=json.dumps(body,sort_keys=True)
                 body=canonicalize_paths(body,aliases,planning=planning)
+                if not planning:
+                    body=await delivery.capture_binary(body,request.get('metadata',{}).get('owned_files',[]))
                 if json.dumps(body,sort_keys=True)!=original:
                     event('pr5_transport_paths_canonicalized',task_id=task_id)
+                if planning and body.get('unresolved')!=[]:
+                    event('pr5_contract_blocked',
+                          field_present='unresolved' in body,
+                          field_type=type(body.get('unresolved')).__name__,
+                          blockers=body.get('unresolved'),
+                          response_fields=sorted(body))
                 envelope={'status':'success','producer':'subscription-model','body':body}
             except Exception as exc:
                 event('pr5_native_error',task_id=task_id,error_type=type(exc).__name__)
@@ -298,9 +354,11 @@ async def solve(session):
             outcome=await done
             workspace=directory/'run'/'workspace'
             if all((workspace/n).is_file() for n in names):
-                await publish(session,workspace,names,archive)
+                final_check,_=await delivery.publish(workspace)
+                if final_check['status']!='passed':
+                    raise ValueError('Final delivery integrity failed: '+final_check['detail'])
             event('pr5_finished',ok=outcome.ok,states={k:v.value for k,v in outcome.states.items()})
-            return 'PR5 execution finished; host acceptance='+str(outcome.ok)+'. Deliverable: '+archive
+            return delivery.final_message(workspace,outcome.ok)
         except Exception as exc:
             event('pr5_run_error',error_type=type(exc).__name__,detail=str(exc)[:500])
             raise

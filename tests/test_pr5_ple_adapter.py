@@ -2,7 +2,9 @@ import asyncio
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import sys
+import zipfile
 
 import pytest
 
@@ -10,21 +12,28 @@ ENTRY=Path(__file__).resolve().parents[1]/'ple_entry'
 sys.path.insert(0,str(ENTRY))
 spec=importlib.util.spec_from_file_location('pr5_ple_adapter',ENTRY/'pr5_adapter.py')
 adapter=importlib.util.module_from_spec(spec);spec.loader.exec_module(adapter)
+from ple_delivery import Delivery, EvidenceSession, declared_package, normalize_spec, first_reads
+from container_audit import run as audit_delivery, payload_check
 
 
 def test_declared_output_table_is_imported_without_task_name_branch():
     source='Write `/filesystem/project/output/submission.zip`.\n| `rows.csv` | `id` |\n| `note.md` | prose |'
-    assert adapter.output_spec(source)==('/filesystem/project/output/submission.zip',['rows.csv','note.md'])
-    with pytest.raises(ValueError):adapter.output_spec('no named deliverables')
+    imported=declared_package(source,'/filesystem/project')
+    assert imported['archives'][0]['path']=='/filesystem/project/output/submission.zip'
+    assert [f['artifact'] for f in imported['files']]==['rows.csv','note.md']
+    assert declared_package('no named deliverables','/task') is None
 
 
 def test_delivery_syntax_checker_does_not_claim_engineering_compliance(tmp_path):
     (tmp_path/'a.csv').write_text('x,y\n1,2\n')
     (tmp_path/'b.json').write_text('{"x":1}')
-    result=adapter.format_check(tmp_path,['a.csv','b.json'])
+    spec=normalize_spec({'files':[{'path':'output/a.csv','kind':'text'},
+        {'path':'output/b.json','kind':'text'}]},'/task')
+    delivery=Delivery(None,spec,[],lambda *a,**k:None)
+    result=delivery.local_check(tmp_path)
     assert result['status']=='passed' and 'engineering checked separately' in result['detail']
     (tmp_path/'a.csv').write_text('x,y\n1\n')
-    assert adapter.format_check(tmp_path,['a.csv','b.json'])['status']=='failed'
+    assert delivery.local_check(tmp_path)['status']=='failed'
 
 
 def test_namespace_translation_leaves_expected_values_and_unknown_paths_unchanged():
@@ -44,6 +53,12 @@ def test_namespace_translation_leaves_expected_values_and_unknown_paths_unchange
                                    {'/task/output/a.json':'a.json'},planning=False)
 
 
+def test_transport_never_erases_or_defaults_blocking_questions():
+    blocked={'unresolved':['missing evidence'],'checks':[]}
+    assert adapter.canonicalize_paths(blocked,{},planning=True)['unresolved']==['missing evidence']
+    assert 'unresolved' not in adapter.canonicalize_paths({'checks':[]},{},planning=True)
+
+
 def test_pr5_native_exchange_preserves_its_request_and_output_contract(tmp_path):
     from feasibility_scheduler.native_client import NativeClient
     from feasibility_scheduler.client import ApiRequest,Outcome
@@ -60,3 +75,139 @@ def test_pr5_native_exchange_preserves_its_request_and_output_contract(tmp_path)
         result=await pending
         assert result.outcome is Outcome.SUCCESS and result.parsed_body['files']['a.csv']=='x\n1\n'
     asyncio.run(run())
+
+
+class LocalTaskSession:
+    """Real subprocess/file operations in an isolated fixture; no model or task data."""
+    workdir = '/'
+    mcp_servers = []
+
+    def time_left(self): return 21600
+
+    async def read_file(self, path): return Path(path).read_bytes()
+
+    async def write_file(self, path, data, **kwargs):
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data.encode() if isinstance(data, str) else data)
+        return p.stat().st_size
+
+    async def exec(self, command, **kwargs):
+        result = await asyncio.to_thread(subprocess.run, command, shell=True, capture_output=True, text=True)
+        return {'exit_code': result.returncode, 'output': result.stdout + result.stderr}
+
+
+def package_spec(root):
+    return normalize_spec({'files': [
+        {'path': 'output/rows.csv', 'kind': 'text'},
+        {'path': 'output/note.md', 'kind': 'text'}],
+        'archives': [{'path': 'output/submission.zip', 'members': {
+            'rows.csv': 'output/rows.csv', 'note.md': 'output/note.md'}}]}, str(root))
+
+
+def test_task_import_accepts_binary_and_final_message_without_requiring_a_zip():
+    value = normalize_spec({'files': [
+        {'path': '/app/files/output/report.docx', 'kind': 'binary'},
+        {'path': '/app/files/output/model.ifc', 'kind': 'binary'},
+        {'kind': 'final_message'}]}, '/app/files')
+    assert len(value['files']) == 3 and value['archives'] == []
+    assert value['files'][0]['artifact'].endswith('report.docx.json')
+    assert declared_package('Write /app/files/output/report.docx', '/app/files') is None
+    with pytest.raises(ValueError):
+        normalize_spec({'files': [{'path': '../input.csv', 'kind': 'text'}]}, '/app/files')
+    with pytest.raises(ValueError):
+        normalize_spec({'files': [{'path': '/app/files/tests/key.json', 'kind': 'text'}]}, '/app/files')
+
+
+@pytest.mark.parametrize('defect', ['stale', 'extra', 'missing', 'duplicate'])
+def test_zip_audit_detects_actual_content_and_membership_defects(tmp_path, defect):
+    spec = package_spec(tmp_path)
+    output = tmp_path/'output'; output.mkdir()
+    (output/'rows.csv').write_text('id,value\n1,2\n')
+    (output/'note.md').write_text('Current note')
+    assert audit_delivery(spec, package=True)['complete']
+    archive = output/'submission.zip'
+    if defect == 'stale':
+        (output/'note.md').write_text('Updated note')
+    elif defect == 'missing':
+        archive.unlink()
+    else:
+        with zipfile.ZipFile(archive, 'a') as z:
+            z.writestr('extra.txt' if defect == 'extra' else 'note.md', 'unexpected')
+    evidence = audit_delivery(spec)
+    assert evidence['archives'][0]['status'] == 'failed'
+    assert not evidence['complete']
+
+
+def test_first_read_order_and_early_zip_checkpoint_use_executed_evidence(tmp_path):
+    async def run():
+        root = tmp_path/'task'; root.mkdir()
+        (root/'task.md').write_text('Read `handover/brief.md` first.')
+        (root/'handover').mkdir(); (root/'handover/brief.md').write_text('Issued brief')
+        (root/'other.md').write_text('Reference')
+        session = EvidenceSession(LocalTaskSession())
+        task_path = str(root/'task.md')
+        source = (await session.read_file(task_path)).decode()
+        priority = first_reads(source, str(root))
+        references = await adapter.source_materials(session, str(root), priority)
+        assert list(references)[0] == 'provided/handover/brief.md'
+        required = [task_path, *priority]
+        assert [r['path'] for r in session.reads][:2] == required
+        delivery = Delivery(session, package_spec(root), required, lambda *a, **k: None)
+        assert not (await delivery.checkpoint())['complete']
+        await session.write_file(str(root/'output/rows.csv'), 'id,value\n1,2\n')
+        await session.write_file(str(root/'output/note.md'), 'First actual candidate')
+        evidence = await delivery.checkpoint()
+        assert evidence['complete'] and evidence['required_read_order']
+        first = evidence['first_complete_host_operation']
+        assert first == session.operations and (root/'output/submission.zip').is_file()
+        await session.write_file(str(root/'output/note.md'), 'Improved candidate')
+        later = await delivery.checkpoint()
+        assert later['first_complete_host_operation'] == first
+        with zipfile.ZipFile(root/'output/submission.zip') as z:
+            assert z.read('note.md') == b'Improved candidate'
+        delivery.required_reads = list(reversed(required))
+        assert not (await delivery.inspect())['required_read_order']
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('extension,member', [('xlsx', 'xl/workbook.xml'), ('docx', 'word/document.xml')])
+@pytest.mark.parametrize('mode', ['files', 'file'])
+def test_binary_receipt_goes_through_original_pr5_delivery_and_detects_later_mutation(tmp_path, extension, member, mode):
+    from feasibility_scheduler.adapters.legacy_doc import _ArtifactSink, legacy_artifact_acceptor
+    from feasibility_scheduler.models import Task
+    from feasibility_scheduler.fake_client import ApiRequest, FakeClient, Step
+    async def run():
+        root = tmp_path/'task'; output = root/'output'; output.mkdir(parents=True)
+        remote = output/('report.' + extension)
+        with zipfile.ZipFile(remote, 'w') as z:
+            z.writestr(member, '<document/>')
+        spec = normalize_spec({'files': [{'path': str(remote), 'kind': 'binary'}]}, str(root))
+        session = EvidenceSession(LocalTaskSession())
+        delivery = Delivery(session, spec, [], lambda *a, **k: None)
+        name = delivery.names[0]
+        content = json.dumps({'path': str(remote), 'size': -1, 'sha256': 'invented', 'generation_script': 'fixture generation'})
+        body = {'ok': True, 'files': {name: content}} if mode == 'files' else {
+            'ok': True, 'delivery': 'file', 'file': {'path': name, 'content': content}}
+        body = await delivery.capture_binary(body, [name])
+        receipt = json.loads(body['files'][name] if mode == 'files' else body['file']['content'])
+        assert receipt['sha256'] != 'invented' and receipt['size'] > 0
+        assert receipt['generation_script'] == 'fixture generation'
+        workspace = tmp_path/'workspace'; workspace.mkdir()
+        sink = _ArtifactSink(workspace)
+        acceptor = legacy_artifact_acceptor(sink=sink, mode='loose')
+        response = FakeClient([Step.success(json.dumps(body))]).call(ApiRequest(
+            task_id='binary', idempotency_key='binary-interface-fixture', prompt='fixture only'))
+        task = Task(id='binary', payload={'owned_files': [name]})
+        report = acceptor(task, response)
+        assert report.passed
+        assert (await delivery.publish(workspace))[0]['status'] == 'passed'
+        with zipfile.ZipFile(remote, 'a') as z:
+            z.writestr('changed.txt', 'a later worker version')
+        assert (await delivery.publish(workspace))[0]['status'] == 'failed'
+    asyncio.run(run())
+
+
+def test_unknown_format_is_explicitly_unverified_and_bad_office_file_fails():
+    assert payload_check('drawing.ifc', b'plausible-looking text')[0] == 'unverified'
+    assert payload_check('report.xlsx', b'not an Excel workbook')[0] == 'failed'
