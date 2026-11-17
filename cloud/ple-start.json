@@ -1,5 +1,6 @@
 {
   "task": "frame-extension-method",
   "mode": "subscription-device-auth",
-  "protocol_fix": "af240aa135c1d18b07083f2225a1fd6ec3e2a43a"
+  "protocol_fix": "af240aa135c1d18b07083f2225a1fd6ec3e2a43a",
+  "launch_attempt": 2
 }

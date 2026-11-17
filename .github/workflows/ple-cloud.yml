@@ -15,11 +15,6 @@ jobs:
     timeout-minutes: 360
     env:
       PYTHONUNBUFFERED: '1'
-      CODEX_HOME: ${{ runner.temp }}/ple-auth/codex
-      HF_HOME: ${{ runner.temp }}/ple-auth/huggingface
-      PLE_OPERATOR: ${{ runner.temp }}/ple-operator
-      PLE_KIT: ${{ runner.temp }}/ple-kit
-      PLE_RUN: ${{ runner.temp }}/ple-run
     steps:
       - uses: actions/checkout@v4
         with:
@@ -30,6 +25,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Set private runtime paths
+        shell: bash
+        run: |
+          echo "CODEX_HOME=$RUNNER_TEMP/ple-auth/codex" >> "$GITHUB_ENV"
+          echo "HF_HOME=$RUNNER_TEMP/ple-auth/huggingface" >> "$GITHUB_ENV"
+          echo "PLE_OPERATOR=$RUNNER_TEMP/ple-operator" >> "$GITHUB_ENV"
+          echo "PLE_KIT=$RUNNER_TEMP/ple-kit" >> "$GITHUB_ENV"
+          echo "PLE_RUN=$RUNNER_TEMP/ple-run" >> "$GITHUB_ENV"
       - name: Install pinned operator tools and official kit
         shell: bash
         run: |
