@@ -1,6 +1,0 @@
-{
-  "task": "mv-conveyance-study",
-  "mode": "api-encrypted-upload",
-  "launch_attempt": 8,
-  "reason": "Restart after task output import failed before planning; retain five correction rounds"
-}
