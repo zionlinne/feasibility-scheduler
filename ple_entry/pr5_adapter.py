@@ -41,6 +41,40 @@ def parse_object(text):
     return value
 
 
+async def import_task_spec(worker, prompt, root, event):
+    """Import task I/O with one bounded, schema-directed correction attempt."""
+    first = await worker.run(prompt, importing=True)
+    try:
+        return normalize_spec(first, root)
+    except (KeyError, TypeError, ValueError) as first_error:
+        detail = f'{type(first_error).__name__}: {first_error}'[:500]
+        event('pr5_task_io_import_invalid', attempt=1, detail=detail)
+        correction = (
+            prompt
+            + '\n\nYour previous JSON response was rejected by the host validator: '
+            + detail
+            + '. Re-read only the task brief and referenced output instructions. '
+              'Return a corrected JSON object matching the required schema. '
+              'Declare every explicitly required output file. Use kind=binary for '
+              'XLSX, PDF, DOCX and other binary formats; use kind=text for UTF-8 text. '
+              'Use kind=final_message only when a substantive final response is required '
+              'and no file deliverable is required. Do not invent filenames, paths, or '
+              'archive members. An archive may list only files explicitly declared as '
+              'deliverables. If the brief is genuinely ambiguous, do not guess.'
+        )
+        second = await worker.run(correction, importing=True)
+        try:
+            return normalize_spec(second, root)
+        except (KeyError, TypeError, ValueError) as second_error:
+            event('pr5_task_io_import_failed', attempt=2,
+                  detail=f'{type(second_error).__name__}: {second_error}'[:500])
+            raise ValueError(
+                'Task I/O import failed after one correction attempt; '
+                f'first validation error: {detail}; '
+                f'second validation error: {type(second_error).__name__}: {second_error}'
+            ) from second_error
+
+
 def canonicalize_paths(body,aliases,*,planning):
     """Translate only declared artifact aliases, never predicate values or text."""
     body=json.loads(json.dumps(body))
@@ -259,9 +293,8 @@ async def solve(session):
     spec=declared_package(session.instruction+'\n'+task_source,root)
     if spec is None:
         event('pr5_task_io_import_started')
-        imported=await worker.run('Task root: '+root+'\n'+session.instruction+'\n'+task_source,
-                                  importing=True)
-        spec=normalize_spec(imported,root)
+        import_prompt='Task root: '+root+'\n'+session.instruction+'\n'+task_source
+        spec=await import_task_spec(worker,import_prompt,root,event)
         event('pr5_task_io_import_finished',files=len(spec['files']),archives=len(spec['archives']))
     delivery=Delivery(session,spec,required_reads,event)
     names=delivery.names
