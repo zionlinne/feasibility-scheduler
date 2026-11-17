@@ -1,6 +1,6 @@
 name: fbs-ple
-model_api: openai-compatible/gpt-6-astra
-model_base_url: https://subscription.example.org/v1
+model_api: openai-compatible/gpt-6.1-sol
+model_base_url: https://88api.ai/v1
 install: >-
   uv venv --python 3.12 /opt/harness/venv
   && uv pip install --python /opt/harness/venv/bin/python -r {src}/ple_entry/requirements.txt

@@ -1,5 +1,8 @@
 # One public PLE task on GitHub-hosted Linux
 
+**Current route: [88API setup and running instructions](API.md).** The text
+below documents the previous subscription transport for earlier runs.
+
 `ple-cloud.yml` runs the unchanged PR5 FBS runner through the same adapter used
 locally. It uses the participant's Codex subscription as its model decision
 engine; FBS executes the advertised tools through the official PLE protocol.

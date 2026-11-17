@@ -1,4 +1,4 @@
-name: PLE single task on cloud FBS
+name: PLE single task on cloud FBS API
 on:
   push:
     branches: ['experiment/ple-local-adapter-20261117']
@@ -22,13 +22,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
+      - name: Require configured API key
+        env:
+          MODEL_API_KEY: ${{ secrets.FBS_MODEL_API_KEY }}
+        run: |
+          if [ -z "$MODEL_API_KEY" ]; then
+            echo 'Add repository Actions secret FBS_MODEL_API_KEY before starting the API run.'
+            exit 1
+          fi
       - name: Set private runtime paths
         shell: bash
         run: |
-          echo "CODEX_HOME=$RUNNER_TEMP/ple-auth/codex" >> "$GITHUB_ENV"
           echo "HF_HOME=$RUNNER_TEMP/ple-auth/huggingface" >> "$GITHUB_ENV"
           echo "PLE_OPERATOR=$RUNNER_TEMP/ple-operator" >> "$GITHUB_ENV"
           echo "PLE_KIT=$RUNNER_TEMP/ple-kit" >> "$GITHUB_ENV"
@@ -37,68 +41,57 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$PLE_OPERATOR" "$CODEX_HOME" "$HF_HOME"
-          chmod 700 "$PLE_OPERATOR" "$CODEX_HOME" "$HF_HOME"
+          mkdir -p "$PLE_OPERATOR" "$HF_HOME"
+          chmod 700 "$PLE_OPERATOR" "$HF_HOME"
           python -m pip install uv==0.13.8 huggingface-hub==1.33.0
           uv tool install harbor==0.20.0 --with websockets==15.0.1
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          npm install -g @openai/codex@0.162.1
           git clone https://github.com/google-research/ple.git "$PLE_KIT"
           git -C "$PLE_KIT" checkout 8320f0402fdca9f42476607f72bcfd5271cd50c9
           docker info --format '{{.ServerVersion}}'
-      - name: Validate Linux CLI invocation without calling a model
-        run: python cloud/check_subscription.py --cli-only
-      - name: Authorize Codex subscription with official device login
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo 'Open this step and complete the official ChatGPT device authorization shown below.'
-          codex login --device-auth
-          codex login status
-      - name: Start private subscription decision gateway
-        shell: bash
-        run: |
-          set -euo pipefail
-          python cloud/subscription_gateway.py \
-            --key-file "$PLE_OPERATOR/gateway.key" \
-            --log "$PLE_OPERATOR/gateway-calls.jsonl" \
-            --scratch "$PLE_OPERATOR/scratch" \
-            > "$PLE_OPERATOR/gateway.log" 2>&1 &
-          echo "$!" > "$PLE_OPERATOR/gateway.pid"
-          python - <<'PY'
-          import os, pathlib, time, urllib.request
-          root=pathlib.Path(os.environ['PLE_OPERATOR'])
-          for _ in range(60):
-              try:
-                  urllib.request.urlopen('http://172.17.0.1:4017/health', timeout=2)
-                  break
-              except OSError: time.sleep(1)
-          else: raise RuntimeError('Subscription gateway did not start')
-          token=(root/'gateway.key').read_text().strip()
-          (root/'model.env').write_text('MODEL_API_KEY='+token+'\n')
-          (root/'model.env').chmod(0o600)
-          PY
-      - name: Verify one subscription response before downloading the task
-        run: python cloud/check_subscription.py
-      - name: Authorize approved Hugging Face account
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo 'Use the Hugging Face account approved for google/physical-engineerings-last-exam.'
-          hf auth login --format agent
-          hf auth whoami
-      - name: Run representative task with the actual PR5 FBS runner
+      - name: Verify API JSON and tool calls, then write private credentials
+        env:
+          MODEL_API_KEY: ${{ secrets.FBS_MODEL_API_KEY }}
         shell: bash
         run: |
           set -euo pipefail
           cd "$PLE_KIT"
+          PYTHONPATH="$PLE_KIT" uv run --with pyyaml python "$GITHUB_WORKSPACE/cloud/check_api.py" "$GITHUB_WORKSPACE" \
+            2>&1 | tee "$PLE_OPERATOR/api-check.log"
+          python - <<'PY'
+          import os, pathlib
+          root=pathlib.Path(os.environ['PLE_OPERATOR'])
+          token=os.environ['MODEL_API_KEY']
+          if any(c in token for c in '\r\n\x00'): raise ValueError('Invalid API key')
+          (root/'model.env').write_text('MODEL_API_KEY='+token+'\n',encoding='utf-8')
+          (root/'model.env').chmod(0o600)
+          PY
+      - name: Authorize approved Hugging Face account
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$HF_TOKEN" ]; then
+            unset HF_TOKEN
+            echo 'Use the Hugging Face account approved for google/physical-engineerings-last-exam.'
+            hf auth login --format agent
+          fi
+          hf auth whoami
+      - name: Run representative task with the actual PR5 FBS runner
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$HF_TOKEN" ]; then unset HF_TOKEN; fi
+          cd "$PLE_KIT"
           uv run python eval/run.py "$GITHUB_WORKSPACE" \
             --env-file "$PLE_OPERATOR/model.env" \
-            --model-base-url http://172.17.0.1:4017/v1 \
             --tasks frame-extension-method --trials 1 --attempts 1 --out "$PLE_RUN" \
             2>&1 | tee "$PLE_OPERATOR/evaluation.log"
       - name: Collect serve metadata logs
-        if: always()
+        if: ${{ always() && env.PLE_RUN != '' }}
         shell: bash
         run: |
           python - <<'PY'
@@ -120,13 +113,10 @@ jobs:
             ${{ runner.temp }}/ple-run/export.json
             ${{ runner.temp }}/ple-run/artifacts/
             ${{ runner.temp }}/ple-operator/evaluation.log
-            ${{ runner.temp }}/ple-operator/gateway.log
-            ${{ runner.temp }}/ple-operator/gateway-calls.jsonl
+            ${{ runner.temp }}/ple-operator/api-check.log
             ${{ runner.temp }}/ple-operator/serve-logs/
-      - name: Stop gateway
+      - name: Remove private credentials
         if: always()
         shell: bash
         run: |
-          if [ -f "$PLE_OPERATOR/gateway.pid" ]; then
-            kill "$(cat "$PLE_OPERATOR/gateway.pid")" 2>/dev/null || true
-          fi
+          if [ -n "${PLE_OPERATOR:-}" ]; then rm -f -- "$PLE_OPERATOR/model.env"; fi
