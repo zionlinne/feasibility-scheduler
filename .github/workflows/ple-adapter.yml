@@ -1,0 +1,38 @@
+name: PLE local adapter checks
+on:
+  push:
+    branches: ['experiment/ple-local-adapter-20261117']
+  pull_request:
+    paths: ['ple_entry/**', 'tests/test_ple*', 'submission.yaml', 'requirements.txt']
+permissions:
+  contents: read
+jobs:
+  adapter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r ple_entry/requirements.txt pytest==8.4.2 PyYAML==6.0.3
+      - name: Actual FBS, scripted peers, SDK loop and WebSocket tests
+        run: python -m pytest tests/test_ple_adapter.py tests/test_ple_mcp_and_loop.py -q
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+          FEASIBILITY_RUN_INTEGRATION: '0'
+      - uses: actions/checkout@v4
+        with:
+          repository: google-research/ple
+          ref: 8320f0402fdca9f42476607f72bcfd5271cd50c9
+          path: official-ple
+      - name: Official submission schema validation only
+        run: PYTHONPATH=official-ple python -c "from pathlib import Path; from kit.spec import load; s=load(Path('.')); print(s.name, s.model.api)"
+      - name: Build Linux portability image
+        run: docker build -f ple_entry/Dockerfile.test -t fbs-ple-smoke .
+      - name: Start with read-only root and limited resources
+        run: docker run -d --name fbs-ple-smoke --read-only --tmpfs /tmp:rw,size=1g --cpus 2 --memory 4g -e PORT=8765 -p 127.0.0.1:8765:8765 fbs-ple-smoke
+      - run: python tests/check_container_startup.py
+      - name: Cleanup portability container
+        if: always()
+        run: docker rm -f fbs-ple-smoke || true

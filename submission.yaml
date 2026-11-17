@@ -1,0 +1,8 @@
+name: fbs-ple
+model_api: google-cloud/gemini-3.8-flash
+install: >-
+  uv venv --python 3.12 /opt/harness/venv
+  && uv pip install --python /opt/harness/venv/bin/python -r {src}/ple_entry/requirements.txt
+serve: /opt/harness/venv/bin/python {src}/ple_entry/serve.py
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
