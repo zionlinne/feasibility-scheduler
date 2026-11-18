@@ -136,16 +136,18 @@ def test_item_zip_check_detects_skipped_intermediate_update(tmp_path):
     config = declared_item_updates(brief, spec)
     assert config is not None and config['items'] == {'C01': ['DB'], 'C02': ['EMT']}
 
-    def write_zip(c01, c02):
+    def write_zip(c01, c02, *, c02_clause=None, padded=False):
         book = Workbook()
         book.active.title = 'Items'
         book.active.append(['item_id', 'value'])
         book.active.append(['C01', c01])
         book.active.append(['C02', c02])
         choices = book.create_sheet('Alternatives')
-        choices.append(['item_id', 'type'])
+        choices.append(['item_id', 'type', 'governing_clause'])
         choices.append(['C01', 'DB'])
-        choices.append(['C02', 'EMT'])
+        choices.append(['C02', 'EMT', c02_clause])
+        if padded:
+            choices['H3'] = '   '
         binary = io.BytesIO()
         book.save(binary)
         book.close()
@@ -157,9 +159,12 @@ def test_item_zip_check_detects_skipped_intermediate_update(tmp_path):
         session = EvidenceSession(LocalTaskSession())
         delivery = Delivery(session, spec, [], lambda *a, **k: None, item_config=config)
         delivery.snapshot = None
-        write_zip(0, 0)
+        write_zip(0, 0, c02_clause='Provisional; not evaluated   ')
         assert (await delivery.checkpoint())['complete']
-        write_zip(10, 0)
+        write_zip(10, 0, c02_clause='RFP 1.4')
+        with pytest.raises(ValueError, match='observed: C01, C02'):
+            await delivery.record_item_update('C01')
+        write_zip(10, 0, padded=True)
         assert (await delivery.record_item_update('C01'))['sequence'] == 1
         with pytest.raises(ValueError, match='not rewritten'):
             await delivery.record_item_update('C02')

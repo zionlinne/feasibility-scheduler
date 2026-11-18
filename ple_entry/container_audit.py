@@ -116,6 +116,23 @@ def inspect_file(path):
     return {'path': path, 'size': size, 'sha256': digest(p), 'status': status, 'detail': detail}
 
 
+def item_row_values(sheet, header, row):
+    """Ignore empty cells and known draft text on otherwise empty alternative rows."""
+    cells = []
+    for column, value in enumerate(row):
+        if isinstance(value, str) and not value.startswith('='):
+            value = value.rstrip()
+        if value is not None and value != '':
+            cells.append((column, value))
+    if sheet == 'Alternatives' and all(
+            column < len(header) and header[column] in {'item_id', 'type', 'governing_clause'}
+            for column, _ in cells):
+        placeholders = {'provisional; not evaluated', 'provisional', 'not evaluated', 'pending', 'tbd', '待填写'}
+        return [(column, value) for column, value in cells if not (
+            header[column] == 'governing_clause' and isinstance(value, str) and value.casefold() in placeholders)]
+    return cells
+
+
 def item_archive(config):
     """Observe item rows from a ZIP version without revalidating the design."""
     from openpyxl import load_workbook
@@ -160,7 +177,8 @@ def item_archive(config):
                     if not isinstance(item, str) or item.strip() not in hashes:
                         continue
                     item = item.strip()
-                    hashes[item].update(json.dumps([sheet.title, row], default=str).encode() + b'\n')
+                    values = item_row_values(sheet.title, header, row)
+                    hashes[item].update(json.dumps([sheet.title, values], default=str).encode() + b'\n')
                     if sheet.title == 'Items':
                         counts[item] += 1
                     if type_column is not None and type_column < len(row):
