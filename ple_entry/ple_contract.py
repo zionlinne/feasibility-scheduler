@@ -14,6 +14,30 @@ from feasibility_scheduler.adapters.acceptance_profile import validate_responsib
 from feasibility_scheduler.client import Outcome
 
 
+def bind_root_repairs(candidate, tasks, event):
+    """Root reviews the full delivery map. Bind its fallback to host-owned outputs."""
+    owned = {path for task in tasks for path in task.payload.get('owned_files', ())}
+    checks = candidate.get('checks')
+    if not owned or not isinstance(checks, list):
+        return
+    for check in checks:
+        if (not isinstance(check, dict) or check.get('kind') != 'external'
+                or check.get('name') != 'ple-root-review'):
+            continue
+        if 'paths' in check:
+            legacy = check['paths']
+            if ('read_paths' in check or 'repair_paths' in check or not isinstance(legacy, list)
+                    or not legacy or any(not isinstance(path, str) for path in legacy)
+                    or owned.intersection(legacy)):
+                continue
+            check['read_paths'] = check.pop('paths')
+        elif check.get('repair_paths', []) != []:
+            continue  # Preserve explicit scopes and let PR5 reject malformed fields.
+        check.setdefault('read_paths', sorted(owned))
+        check['repair_paths'] = sorted(owned)
+        event('pr5_root_repair_scope_bound', files=sorted(owned))
+
+
 def shape_errors(candidate, profile=None):
     """Collect missing structural fields together, rather than one per model call."""
     errors = []

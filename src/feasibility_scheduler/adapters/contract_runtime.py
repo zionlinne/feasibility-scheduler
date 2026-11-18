@@ -223,9 +223,15 @@ class ContractExecutionMixin:
         unchanged = 0
         for revision in range(previous + 1, limit + 1):
             if report is None or report.passed or report.error or not response.ok:
+                if report is None or not report.passed:
+                    reason = "acceptance_unverified" if response.ok else "worker_response_failed"
+                    self.log.record("contract_repair_skipped", component="contract_adapter", task_id=task_id,
+                                    details={"reason": reason})
                 break
             paths = self.acceptor.repair_files(task)
             if not paths:
+                self.log.record("contract_repair_skipped", component="contract_adapter", task_id=task_id,
+                                details={"reason": "no_authorized_outputs"})
                 break
             artifacts = self._repair_artifacts(paths)
             previous_checks = self.acceptor.results.get(task_id)

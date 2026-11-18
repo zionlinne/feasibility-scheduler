@@ -191,6 +191,12 @@ def test_item_zip_check_detects_skipped_intermediate_update(tmp_path):
         save_receipt()
         report, _ = await delivery.publish(workspace, check_items=True)
         assert report['detail'] == 'Unrecorded item changes in the final ZIP: C01'
+        await delivery.recover_item_archive()
+        restored = await delivery.inspect_item_archive()
+        assert restored == delivery.item_latest
+        archive_path.write_bytes(b'Unfinished ZIP')
+        await delivery.recover_item_archive()
+        assert await delivery.inspect_item_archive() == restored
 
     asyncio.run(run())
 
@@ -501,3 +507,35 @@ def test_explicit_final_zip_does_not_package_input_or_alternative_formats():
         'files': [{'path': archive, 'kind': 'binary', 'artifact': 'receipts/submission.zip.json'}],
         'archives': [],
     }
+
+
+def test_root_review_repairs_declared_outputs_with_pr5(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from feasibility_scheduler.adapters.legacy_doc import run_legacy_doc
+    from feasibility_scheduler.fake_client import FakeClient
+    from test_contract_runtime import setup_task, step
+
+    tasks, plan, data, cfg = setup_task(tmp_path)
+    data['reference_files'] = {'provided/note.md': 'Keep the source material read-only.'}
+    data['external_checker_names'] = ['ple-root-review']
+    plan['checks'][-1] = {'id': 'check-totals', 'kind': 'external', 'name': 'ple-root-review',
+                          'paths': ['provided/note.md'], 'requirements': ['R1']}
+    adapter.bind_root_repairs(plan, tasks, lambda *a, **k: None)
+    effective = plan['checks'][-1]
+    assert effective['read_paths'] == ['provided/note.md']
+    assert effective['repair_paths'] == ['a.json', 'b.json']
+    cfg.task_input_path.write_text(json.dumps(data), encoding='utf-8')
+    client = FakeClient([step({'a.json': '{"total":1}'}), step({'b.json': '{"total":2}'}),
+                         step({'a.json': '{"total":1}', 'b.json': '{"total":1}'})])
+    monkeypatch.setattr('feasibility_scheduler.adapters.legacy_doc.create_client', lambda *a, **k: client)
+    reviews = []
+
+    def root_check(workspace):
+        totals = [json.loads((workspace/name).read_text())['total'] for name in ('a.json', 'b.json')]
+        reviews.append(totals)
+        return {'status': 'passed' if totals[0] == totals[1] else 'failed', 'detail': 'Compare totals'}
+
+    result = run_legacy_doc(replace(cfg, contract_repair_limit=5,
+                                   external_checkers={'ple-root-review': root_check}))
+    assert result.ok
+    assert reviews == [[1, 2], [1, 1]]

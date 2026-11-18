@@ -15,7 +15,7 @@ from feasibility_scheduler.adapters.legacy_doc import LegacyDocConfig, run_legac
 from mcp_tools import TaskMcpTools, TOOLS as MCP_TOOLS
 from ple_delivery import (Delivery, EvidenceSession, declared_item_updates, declared_package, first_reads,
                           normalize_spec, task_root)
-from ple_contract import prepare_contract
+from ple_contract import bind_root_repairs, prepare_contract
 
 
 def event(kind, **values):
@@ -130,6 +130,11 @@ WRITE_TOOL=tool('write_file',{'path':{'type':'string'},'content':{'type':'string
 RECORD_ITEM_TOOL=tool('record_item_zip',{'item_id':{'type':'string'}})
 
 
+def owns_item_archive(delivery, owned):
+    return (delivery.item_config is not None
+            and delivery.aliases[delivery.item_config['archive']] in owned)
+
+
 class ModelWorker:
     def __init__(self,session,delivery=None):
         from openai import AsyncOpenAI
@@ -156,7 +161,7 @@ class ModelWorker:
             raise ValueError('Model stream ended before the completion finished')
         return response
 
-    async def run(self,prompt,*,planning=False,review=False,importing=False,protocol_feedback=False,owned=()):
+    async def run(self,prompt,*,planning=False,review=False,importing=False,protocol_feedback=False,owned=(),continuing=False):
         rules=(('You import task I/O for the PR5 adapter. ' if importing else
                 'You execute a request dispatched by the existing PR5 FBS harness. ')+
           'Follow its current contract, ownership, checks and output JSON schema. '
@@ -216,7 +221,14 @@ class ModelWorker:
         else:
             rules+=('Compute using task tools, then deliver ALL current owned files as complete '
                     'text contents in the PR5 files map. Its keys MUST be the exact relative owned_files '
-                    'names, not absolute remote paths. Do not replace files with paths or summaries. ')
+                    'names, not absolute remote paths. Do not replace files with paths or summaries. '
+                    'Before the final response, inspect the assigned deliverables against the original '
+                    'acceptance obligations. Complete required calculations, supporting inputs and sources '
+                    'before recommending a solution. Verify the actual output for missing required sections, '
+                    'placeholders and inconsistent formulas. State genuine blockers explicitly. ')
+            if continuing:
+                rules+=('Resume from the current artifacts in this same task container. Inspect existing '
+                        'assigned outputs and generation scripts first and preserve correct prior work. ')
         can_record_item = False
         if self.delivery is not None:
             rules+='\nHOST TASK DELIVERY MAP (read-only): '+json.dumps(self.delivery.spec)+'\n'
@@ -243,12 +255,13 @@ class ModelWorker:
                             'new ZIP and saves its order and SHA-256. At acceptance it rejects missing '
                             'item checkpoints or unrecorded changes. Use this capability for the public '
                             'incremental delivery obligation. Item evidence is generated during execution.')
-                can_record_item = (not (planning or review or importing)
-                                   and self.delivery.aliases[config['archive']] in owned)
+                can_record_item = not (planning or review or importing) and owns_item_archive(self.delivery, owned)
                 if can_record_item:
                     rules+=('\nITEM DELIVERY SPEC: '+json.dumps(config)+'\n'
-                            'Write the complete provisional ZIP first. Confirm the host reports it on disk. '
-                            'Finish one item at a time, update its workbook rows (and report as needed), '
+                            'If the provisional ZIP is absent, write it first and confirm it is on disk. '
+                            'Otherwise build on the current ZIP. ZIP records establish the delivery sequence. '
+                            'Finish the required design checks and itemized calculations before recording '
+                            'each item. Update its workbook rows (and report as needed), '
                             'atomically rewrite the ZIP, then call record_item_zip for that item before '
                             'changing another item. The host compares actual workbook rows with the previous '
                             'recorded version. Use one item per ZIP update, including repairs. '
@@ -260,6 +273,7 @@ class ModelWorker:
         messages=[{'role':'system','content':rules},{'role':'user','content':prompt}]
         operations=0
         calls=0
+        correcting_reply = False
         phase_started=monotonic()
         phase = 'root' if review else 'import' if importing else 'plan' if planning else 'worker'
         while True:
@@ -285,8 +299,19 @@ class ModelWorker:
                 await self.session.usage(self.model,u.prompt_tokens,u.completion_tokens,cached)
             message=response.choices[0].message
             messages.append(message.model_dump(exclude_none=True))
-            if not message.tool_calls:
-                result=parse_object(message.content or '')
+            if not message.tool_calls or correcting_reply:
+                try:
+                    result=parse_object(message.content or '')
+                except (ValueError, IndexError):
+                    if phase != 'worker' or correcting_reply:
+                        raise
+                    correcting_reply = True
+                    tools = []
+                    event('pr5_worker_reply_correction')
+                    messages.append({'role':'user','content':
+                        'Correct only the invalid JSON response format using the current work unit schema. '
+                        'Preserve all existing work and return exactly the assigned files map.'})
+                    continue
                 if review and operations==0:
                     raise ValueError('Root did not inspect the actual task environment')
                 event('pr5_model_phase_finished', phase=phase, seconds=round(monotonic()-phase_started, 1),
@@ -400,7 +425,10 @@ async def solve(session):
                'resource/day consistency and citations from supplied source documents. '
                'Return {"status":"passed|failed|unverified","detail":"specific evidence and defects",'
                '"criteria":[{"requirement":"...","status":"passed|failed|unverified","evidence":"..."}]}. '
-               'Use unverified when evidence is insufficient. Do not claim professional certification.')
+               'Missing calculations, inputs, or citations that the worker must supply are failures. '
+                'Use unverified when inspection cannot establish the result because of a tool or input-access '
+                'problem. Name the affected deliverable and a specific repair for each failed criterion. '
+                'Do not claim professional certification.')
             answer=await worker.run(prompt,review=True)
             status=answer.get('status');criteria=answer.get('criteria')
             if status not in ('passed','failed','unverified') or not isinstance(criteria,list) or not criteria:
@@ -439,6 +467,25 @@ async def solve(session):
                           for t in build_legacy_tasks(task_input,task_md=task_source)]
         done=asyncio.create_task(asyncio.to_thread(run_legacy_doc,cfg))
         handled=set();active=set();seen_events=set()
+        failed_work = set()
+
+        def forward_scheduler_events():
+            audit = directory/'run'/'events.jsonl'
+            if not audit.exists():
+                return
+            for line in audit.read_text(encoding='utf8').splitlines():
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if row['event_id'] in seen_events:
+                    continue
+                seen_events.add(row['event_id'])
+                fields = {}
+                if row['type'] == 'contract_repair_skipped':
+                    fields['reason'] = (row.get('details') or {}).get('reason')
+                event('pr5_scheduler_event',type=row['type'],task_id=row.get('task_id'),
+                      state=row.get('new_state'),sequence=row.get('sequence'),**fields)
 
         async def execute(request_path):
             request=json.loads(request_path.read_text(encoding='utf8'))
@@ -449,10 +496,14 @@ async def solve(session):
                   repair_round=int(repair.group(1)) if repair else None)
             try:
                 owned = request.get('metadata',{}).get('owned_files',[])
-                body=await worker.run(request['prompt'],planning=planning,owned=owned)
+                continuing = bool(repair) or task_id in failed_work
+                if task_id in failed_work:
+                    event('pr5_worker_resuming')
+                body=await worker.run(request['prompt'],planning=planning,owned=owned,continuing=continuing)
                 original=json.dumps(body,sort_keys=True)
                 body=canonicalize_paths(body,aliases,planning=planning)
                 if planning:
+                    bind_root_repairs(body, validation_tasks, event)
                     body=await prepare_contract(body,worker=worker,tasks=validation_tasks,
                         source=task_source,checkers=cfg.external_checkers,aliases=aliases,
                         canonicalize=canonicalize_paths,event=event)
@@ -469,6 +520,13 @@ async def solve(session):
                 envelope={'status':'success','producer':'subscription-model','body':body}
             except Exception as exc:
                 event('pr5_native_error',task_id=task_id,error_type=type(exc).__name__)
+                if not planning:
+                    failed_work.add(task_id)
+                    if owns_item_archive(delivery, owned):
+                        try:
+                            await delivery.recover_item_archive()
+                        except Exception as recovery_error:
+                            event('pr5_item_version_restore_failed',error_type=type(recovery_error).__name__)
                 envelope={'status':'error','producer':'subscription-model','body':{'error_type':type(exc).__name__}}
             tmp=target.with_suffix('.tmp');tmp.write_text(json.dumps(envelope),encoding='utf8');tmp.replace(target)
             event('pr5_native_response',task_id=task_id)
@@ -478,15 +536,7 @@ async def solve(session):
               official_seconds_remaining=round(remaining),source_files=len(references))
         try:
             while not done.done():
-                audit=directory/'run'/'events.jsonl'
-                if audit.exists():
-                    for line in audit.read_text(encoding='utf8').splitlines():
-                        try: row=json.loads(line)
-                        except ValueError: continue
-                        if row['event_id'] not in seen_events:
-                            seen_events.add(row['event_id'])
-                            event('pr5_scheduler_event',type=row['type'],task_id=row.get('task_id'),
-                                  state=row.get('new_state'),sequence=row.get('sequence'))
+                forward_scheduler_events()
                 for request in bridge.glob('*.request.json'):
                     if request.name not in handled:
                         handled.add(request.name)
@@ -494,6 +544,7 @@ async def solve(session):
                         future.add_done_callback(active.discard)
                 await asyncio.sleep(.1)
             outcome=await done
+            forward_scheduler_events()
             workspace=directory/'run'/'workspace'
             if all((workspace/n).is_file() for n in names):
                 final_check,_=await delivery.publish(workspace)

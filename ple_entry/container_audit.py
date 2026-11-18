@@ -8,7 +8,9 @@ import io
 import json
 import os
 from pathlib import Path, PurePosixPath
+import shutil
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
 
@@ -27,6 +29,24 @@ def digest(path):
 def safe_file(path):
     p = Path(path)
     return p.is_file() and not any(x.is_symlink() for x in (p, *p.parents))
+
+
+def copy_zip_version(source, target, expected_digest):
+    """Atomically copy a host-selected ZIP version without changing source data."""
+    target = Path(target)
+    if not safe_file(source) or any(p.is_symlink() for p in (target, *target.parents)):
+        raise ValueError('Unsafe ZIP checkpoint path')
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as output:
+        temporary = Path(output.name)
+    try:
+        shutil.copyfile(source, temporary)
+        if digest(temporary) != expected_digest:
+            raise ValueError('ZIP version differs from its recorded digest')
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return {'copied': True}
 
 
 def payload_check(name, data):
@@ -245,7 +265,9 @@ def run(spec, *, package=False):
 
 if __name__ == '__main__':
     value = json.loads(sys.argv[1])
-    if '--item-archive' in sys.argv[2:]:
+    if '--copy-zip-version' in sys.argv[2:]:
+        print(json.dumps(copy_zip_version(**value)))
+    elif '--item-archive' in sys.argv[2:]:
         try:
             print(json.dumps(item_archive(value)))
         except (ValueError, KeyError, OSError, zipfile.BadZipFile) as exc:

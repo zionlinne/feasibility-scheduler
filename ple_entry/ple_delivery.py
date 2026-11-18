@@ -260,6 +260,7 @@ class Delivery:
         self.item_baseline = None
         self.item_latest = None
         self.item_updates = []
+        self.item_snapshot = None
 
     @property
     def names(self):
@@ -288,6 +289,7 @@ class Delivery:
                 if baseline['zip_sha256'] != archive['sha256']:
                     raise ValueError('Delivery ZIP changed before the baseline was recorded')
                 self.item_baseline = self.item_latest = baseline
+                await self.save_item_version(baseline)
             except ValueError as exc:
                 evidence['complete'] = False
                 evidence['item_baseline_error'] = str(exc)
@@ -311,6 +313,36 @@ class Delivery:
             raise ValueError(observed['error'])
         return observed
 
+    async def save_item_version(self, observed):
+        digest = observed['zip_sha256']
+        path = self.script + '-versions/' + digest + '.zip'
+        try:
+            await self.run_audit({'source': self.item_config['archive'], 'target': path,
+                                  'expected_digest': digest}, ' --copy-zip-version')
+            self.item_snapshot = (path, digest)
+        except ValueError:
+            self.event('pr5_item_version_save_failed')
+
+    async def recover_item_archive(self):
+        async with self.lock:
+            if self.item_snapshot is None or self.item_latest is None:
+                return
+            saved, digest = self.item_snapshot
+            if digest != self.item_latest['zip_sha256']:
+                return
+            try:
+                observed = await self.inspect_item_archive()
+            except ValueError:
+                observed = None
+            if observed is not None and observed['item_sha256'] == self.item_latest['item_sha256']:
+                return  # The current ZIP is readable and preserves every recorded item.
+            try:
+                await self.run_audit({'source': saved, 'target': self.item_config['archive'],
+                                      'expected_digest': digest}, ' --copy-zip-version')
+                self.event('pr5_item_version_restored')
+            except ValueError:
+                self.event('pr5_item_version_restore_failed')
+
     async def record_item_update(self, item_id):
         if self.item_config is None or not isinstance(item_id, str) or item_id not in self.item_config['items']:
             raise ValueError('Unknown delivery item ID')
@@ -328,6 +360,7 @@ class Delivery:
             record = {'item': item_id, 'sequence': len(self.item_updates) + 1,
                       'previous_zip_sha256': self.item_latest['zip_sha256'],
                       'zip_sha256': observed['zip_sha256'], 'item_sha256': observed['item_sha256'][item_id]}
+            await self.save_item_version(observed)
             self.item_latest = observed
             self.item_updates.append(record)
             self.event('pr5_item_zip_recorded', **record,

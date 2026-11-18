@@ -1,6 +1,6 @@
 {
   "task": "mv-conveyance-study",
   "mode": "api-encrypted-upload",
-  "launch_attempt": 12,
-  "reason": "Rerun the same electrical task with draft-cell normalization in the item checks"
+  "launch_attempt": 13,
+  "reason": "Rerun the electrical task with scoped review repairs and completion checks"
 }
