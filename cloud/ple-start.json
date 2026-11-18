@@ -1,6 +1,0 @@
-{
-  "task": "mv-conveyance-study",
-  "mode": "api-encrypted-upload",
-  "launch_attempt": 10,
-  "reason": "Rerun the same task on 88API gpt-6.2-sol with live progress and first-delivery upload"
-}
