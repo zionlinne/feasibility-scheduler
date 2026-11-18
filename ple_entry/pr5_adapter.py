@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 import re
 import shlex
 import tempfile
+from time import monotonic
 
 from feasibility_scheduler.adapters.legacy_doc import LegacyDocConfig, run_legacy_doc, build_legacy_tasks
 from mcp_tools import TaskMcpTools, TOOLS as MCP_TOOLS
@@ -217,17 +218,27 @@ class ModelWorker:
         router=TaskMcpTools(self.session,readonly=review or importing)
         messages=[{'role':'system','content':rules},{'role':'user','content':prompt}]
         operations=0
+        phase = 'root' if review else 'import' if importing else 'plan' if planning else 'worker'
         while True:
             left=self.session.time_left()
             if left is not None and left<=0: raise TimeoutError('Official task time exhausted')
             kwargs={'model':self.model,'messages':messages,'reasoning_effort':'high',
                     'max_completion_tokens':64000}
             if tools: kwargs.update(tools=tools,tool_choice='auto')
-            response=await asyncio.wait_for(self.client.chat.completions.create(**kwargs),timeout=left)
+            started = monotonic()
+            event('pr5_model_call_started', phase=phase)
+            try:
+                response=await asyncio.wait_for(self.client.chat.completions.create(**kwargs),timeout=left)
+            except Exception:
+                event('pr5_model_call_failed', phase=phase, seconds=round(monotonic()-started, 1))
+                raise
+            u=response.usage
+            cached=getattr(getattr(u,'prompt_tokens_details',None),'cached_tokens',0) or 0
+            event('pr5_model_call_finished', phase=phase, seconds=round(monotonic()-started, 1),
+                  input_tokens=u.prompt_tokens if u else 0,
+                  output_tokens=u.completion_tokens if u else 0, cached_tokens=cached)
             if response.usage:
-                u=response.usage
-                await self.session.usage(self.model,u.prompt_tokens,u.completion_tokens,
-                    getattr(getattr(u,'prompt_tokens_details',None),'cached_tokens',0) or 0)
+                await self.session.usage(self.model,u.prompt_tokens,u.completion_tokens,cached)
             message=response.choices[0].message
             messages.append(message.model_dump(exclude_none=True))
             if not message.tool_calls:
@@ -381,7 +392,9 @@ async def solve(session):
             request=json.loads(request_path.read_text(encoding='utf8'))
             target=request_path.with_name(request_path.name.replace('.request.json','.response.json'))
             task_id=request['task_id'];planning=task_id=='contract_planning'
-            event('pr5_native_dispatch',task_id=task_id,planning=planning)
+            repair = re.search(r':contract-repair:(\d+)$', request.get('idempotency_key',''))
+            event('pr5_native_dispatch',task_id=task_id,planning=planning,
+                  repair_round=int(repair.group(1)) if repair else None)
             try:
                 body=await worker.run(request['prompt'],planning=planning)
                 original=json.dumps(body,sort_keys=True)
