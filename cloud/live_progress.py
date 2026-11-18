@@ -56,6 +56,9 @@ class Progress:
             return 'First complete ZIP saved in the serve container'
         if kind == 'pr5_first_delivery_save_failed':
             return 'Could not save the first complete ZIP on this attempt'
+        if kind == 'pr5_item_zip_recorded':
+            return (f'ZIP update {count(event.get("sequence"))} recorded '
+                    f'({count(event.get("completed"))}/{count(event.get("required"))} items)')
         if kind == 'pr5_scheduler_event' and event.get('type') == 'contract_repair_stalled':
             return 'Stopped repeating repairs after two unchanged attempts'
         if kind in ('pr5_root_review_started', 'pr5_root_review_finished'):

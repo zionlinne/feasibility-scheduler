@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import importlib.util
 import io
 import json
@@ -13,7 +14,7 @@ ENTRY=Path(__file__).resolve().parents[1]/'ple_entry'
 sys.path.insert(0,str(ENTRY))
 spec=importlib.util.spec_from_file_location('pr5_ple_adapter',ENTRY/'pr5_adapter.py')
 adapter=importlib.util.module_from_spec(spec);spec.loader.exec_module(adapter)
-from ple_delivery import Delivery, EvidenceSession, declared_package, normalize_spec, first_reads
+from ple_delivery import Delivery, EvidenceSession, declared_item_updates, declared_package, normalize_spec, first_reads
 from container_audit import run as audit_delivery, payload_check
 
 
@@ -118,6 +119,75 @@ def test_task_import_accepts_binary_and_final_message_without_requiring_a_zip():
         normalize_spec({'files': [{'path': '../input.csv', 'kind': 'text'}]}, '/app/files')
     with pytest.raises(ValueError):
         normalize_spec({'files': [{'path': '/app/files/tests/key.json', 'kind': 'text'}]}, '/app/files')
+
+
+def test_item_zip_check_detects_skipped_intermediate_update(tmp_path):
+    from openpyxl import Workbook
+
+    archive_path = tmp_path/'output'/'submission.zip'
+    archive_path.parent.mkdir()
+    spec = normalize_spec({'files': [{'path': str(archive_path), 'kind': 'binary'}]}, str(tmp_path))
+    brief = '''Rewriting the zip after each item you complete is required.
+    Study for both circuits (items `C01` … `C02`, fixture).
+    Write the ZIP containing `study.xlsx` and the report (`study.md`, `.pdf` or `.docx`).
+    Use conveyance types `DB` (site items) and `EMT` (item C02).
+    **Items** — `item_id`, `value`
+    **Alternatives** — `item_id`, `type`'''
+    config = declared_item_updates(brief, spec)
+    assert config is not None and config['items'] == {'C01': ['DB'], 'C02': ['EMT']}
+
+    def write_zip(c01, c02):
+        book = Workbook()
+        book.active.title = 'Items'
+        book.active.append(['item_id', 'value'])
+        book.active.append(['C01', c01])
+        book.active.append(['C02', c02])
+        choices = book.create_sheet('Alternatives')
+        choices.append(['item_id', 'type'])
+        choices.append(['C01', 'DB'])
+        choices.append(['C02', 'EMT'])
+        binary = io.BytesIO()
+        book.save(binary)
+        book.close()
+        with zipfile.ZipFile(archive_path, 'w') as archive:
+            archive.writestr('study.xlsx', binary.getvalue())
+            archive.writestr('study.md', 'Fixture report')
+
+    async def run():
+        session = EvidenceSession(LocalTaskSession())
+        delivery = Delivery(session, spec, [], lambda *a, **k: None, item_config=config)
+        delivery.snapshot = None
+        write_zip(0, 0)
+        assert (await delivery.checkpoint())['complete']
+        write_zip(10, 0)
+        assert (await delivery.record_item_update('C01'))['sequence'] == 1
+        with pytest.raises(ValueError, match='not rewritten'):
+            await delivery.record_item_update('C02')
+        write_zip(11, 20)
+        with pytest.raises(ValueError, match='exactly the named item'):
+            await delivery.record_item_update('C02')
+        write_zip(10, 20)
+        workspace = tmp_path/'workspace'
+        receipt = workspace/delivery.names[0]
+        receipt.parent.mkdir(parents=True)
+
+        def save_receipt():
+            content = archive_path.read_bytes()
+            receipt.write_text(json.dumps({'path': str(archive_path), 'size': len(content),
+                                          'sha256': hashlib.sha256(content).hexdigest()}))
+
+        save_receipt()
+        report, evidence = await delivery.publish(workspace, check_items=True)
+        assert report == {'status': 'failed', 'detail': 'Missing recorded ZIP updates for: C02'}
+        assert evidence['complete'] and evidence['item_updates']['missing_items'] == ['C02']
+        assert (await delivery.record_item_update('C02'))['sequence'] == 2
+        assert (await delivery.publish(workspace, check_items=True))[0]['status'] == 'passed'
+        write_zip(11, 20)
+        save_receipt()
+        report, _ = await delivery.publish(workspace, check_items=True)
+        assert report['detail'] == 'Unrecorded item changes in the final ZIP: C01'
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize('defect', ['stale', 'extra', 'missing', 'duplicate'])

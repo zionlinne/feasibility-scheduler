@@ -15,7 +15,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install -r ple_entry/requirements.txt pytest==8.4.2 PyYAML==6.0.3
+      - run: pip install -r ple_entry/requirements.txt pytest==8.4.2 PyYAML==6.0.3 openpyxl==3.1.5
       - name: Targeted PLE interface checks (no live models)
         run: >-
           python -m pytest tests/test_ple_interfaces.py tests/test_pr5_ple_adapter.py tests/test_ple_gateway.py

@@ -13,7 +13,7 @@ from time import monotonic
 
 from feasibility_scheduler.adapters.legacy_doc import LegacyDocConfig, run_legacy_doc, build_legacy_tasks
 from mcp_tools import TaskMcpTools, TOOLS as MCP_TOOLS
-from ple_delivery import (Delivery, EvidenceSession, declared_package, first_reads,
+from ple_delivery import (Delivery, EvidenceSession, declared_item_updates, declared_package, first_reads,
                           normalize_spec, task_root)
 from ple_contract import prepare_contract
 
@@ -127,6 +127,7 @@ def tool(name,props):
 READ_TOOLS=[tool('bash',{'command':{'type':'string'},'timeout_sec':{'type':'integer'}}),
             tool('read_file',{'path':{'type':'string'}})]
 WRITE_TOOL=tool('write_file',{'path':{'type':'string'},'content':{'type':'string'}})
+RECORD_ITEM_TOOL=tool('record_item_zip',{'item_id':{'type':'string'}})
 
 
 class ModelWorker:
@@ -155,7 +156,7 @@ class ModelWorker:
             raise ValueError('Model stream ended before the completion finished')
         return response
 
-    async def run(self,prompt,*,planning=False,review=False,importing=False,protocol_feedback=False):
+    async def run(self,prompt,*,planning=False,review=False,importing=False,protocol_feedback=False,owned=()):
         rules=(('You import task I/O for the PR5 adapter. ' if importing else
                 'You execute a request dispatched by the existing PR5 FBS harness. ')+
           'Follow its current contract, ownership, checks and output JSON schema. '
@@ -216,6 +217,7 @@ class ModelWorker:
             rules+=('Compute using task tools, then deliver ALL current owned files as complete '
                     'text contents in the PR5 files map. Its keys MUST be the exact relative owned_files '
                     'names, not absolute remote paths. Do not replace files with paths or summaries. ')
+        can_record_item = False
         if self.delivery is not None:
             rules+='\nHOST TASK DELIVERY MAP (read-only): '+json.dumps(self.delivery.spec)+'\n'
             rules+=('For kind=binary, generate the real file inside the task container using tools. '
@@ -232,7 +234,28 @@ class ModelWorker:
                     'Engineering review must independently verify every required deliverable, all '
                     'unknown format checks, and the completeness of this I/O map against the original '
                     'task; omissions or invented requirements fail review. ')
-        tools=[] if planning else READ_TOOLS+([] if review or importing else [WRITE_TOOL])+MCP_TOOLS
+            config = self.delivery.item_config
+            if config is not None:
+                if planning and not protocol_feedback:
+                    rules+=(' The existing ple-package-evidence checker has an item-by-item ZIP checkpoint. '
+                            'It captures a complete provisional workbook and report, then record_item_zip '
+                            'independently identifies the changed item from actual workbook rows in each '
+                            'new ZIP and saves its order and SHA-256. At acceptance it rejects missing '
+                            'item checkpoints or unrecorded changes. Use this capability for the public '
+                            'incremental delivery obligation. Item evidence is generated during execution.')
+                can_record_item = (not (planning or review or importing)
+                                   and self.delivery.aliases[config['archive']] in owned)
+                if can_record_item:
+                    rules+=('\nITEM DELIVERY SPEC: '+json.dumps(config)+'\n'
+                            'Write the complete provisional ZIP first. Confirm the host reports it on disk. '
+                            'Finish one item at a time, update its workbook rows (and report as needed), '
+                            'atomically rewrite the ZIP, then call record_item_zip for that item before '
+                            'changing another item. The host compares actual workbook rows with the previous '
+                            'recorded version. Use one item per ZIP update, including repairs. '
+                            'A plain final ZIP or a final summary cannot establish this sequence. '
+                            'Items already recorded: '+json.dumps(sorted({r['item'] for r in self.delivery.item_updates}))+'. ')
+        write_tools = [WRITE_TOOL] + ([RECORD_ITEM_TOOL] if can_record_item else [])
+        tools=[] if planning else READ_TOOLS+([] if review or importing else write_tools)+MCP_TOOLS
         router=TaskMcpTools(self.session,readonly=review or importing)
         messages=[{'role':'system','content':rules},{'role':'user','content':prompt}]
         operations=0
@@ -281,15 +304,20 @@ class ModelWorker:
                                     'detail':'Binary input: use task bash or MCP to parse/inspect it; this text is not its content'}
                     elif fn.name=='write_file' and not review:
                         result={'bytes':await self.session.write_file(args['path'],args['content'])}
+                    elif fn.name=='record_item_zip' and can_record_item:
+                        result=await self.delivery.record_item_update(args['item_id'])
                     elif fn.name in ('task_mcp_tools','task_mcp_call'):
                         result=await router.run({'name':fn.name,'arguments':fn.arguments})
                     else: raise ValueError('Tool not available')
                 except Exception as exc:
                     result={'error_type':type(exc).__name__,'detail':str(exc)[:1000]}
-                if self.delivery is not None and not review and not importing and fn.name in ('bash','write_file','task_mcp_call'):
+                if (self.delivery is not None and not review and not importing
+                        and self.delivery.item_latest is None and fn.name in ('bash','write_file','task_mcp_call')):
                     try:
                         evidence=await self.delivery.checkpoint()
                         result={'tool_result':result,'complete_delivery_on_disk':evidence['complete']}
+                        if 'item_baseline_error' in evidence:
+                            result['item_baseline_error'] = evidence['item_baseline_error']
                     except Exception as exc:
                         result={'tool_result':result,'delivery_checkpoint_error':type(exc).__name__}
                 text=json.dumps(result,ensure_ascii=False)
@@ -337,7 +365,8 @@ async def solve(session):
         import_prompt='Task root: '+root+'\n'+session.instruction+'\n'+task_source
         spec=await import_task_spec(worker,import_prompt,root,event)
         event('pr5_task_io_import_finished',files=len(spec['files']),archives=len(spec['archives']))
-    delivery=Delivery(session,spec,required_reads,event)
+    item_config = declared_item_updates(session.instruction+'\n'+task_source,spec)
+    delivery=Delivery(session,spec,required_reads,event,item_config=item_config)
     names=delivery.names
     aliases=delivery.aliases
     aliases.update({str(PurePosixPath(root)/name.removeprefix('provided/')):name for name in references})
@@ -358,7 +387,7 @@ async def solve(session):
 
         async def review(workspace):
             nonlocal review_round
-            checked,evidence=await delivery.publish(workspace)
+            checked,evidence=await delivery.publish(workspace,check_items=True)
             if checked['status']!='passed': return checked
             before={n:hashlib.sha256((workspace/n).read_bytes()).hexdigest() for n in names}
             review_round+=1
@@ -393,7 +422,7 @@ async def solve(session):
             return asyncio.run_coroutine_threadsafe(review(workspace),loop).result()
 
         def package_checker(workspace):
-            checked,_=asyncio.run_coroutine_threadsafe(delivery.publish(workspace),loop).result()
+            checked,_=asyncio.run_coroutine_threadsafe(delivery.publish(workspace,check_items=True),loop).result()
             return checked
 
         remaining=max(1,session.time_left() or 21600)
@@ -419,7 +448,8 @@ async def solve(session):
             event('pr5_native_dispatch',task_id=task_id,planning=planning,
                   repair_round=int(repair.group(1)) if repair else None)
             try:
-                body=await worker.run(request['prompt'],planning=planning)
+                owned = request.get('metadata',{}).get('owned_files',[])
+                body=await worker.run(request['prompt'],planning=planning,owned=owned)
                 original=json.dumps(body,sort_keys=True)
                 body=canonicalize_paths(body,aliases,planning=planning)
                 if planning:
@@ -427,7 +457,7 @@ async def solve(session):
                         source=task_source,checkers=cfg.external_checkers,aliases=aliases,
                         canonicalize=canonicalize_paths,event=event)
                 else:
-                    body=await delivery.capture_binary(body,request.get('metadata',{}).get('owned_files',[]))
+                    body=await delivery.capture_binary(body,owned)
                 if json.dumps(body,sort_keys=True)!=original:
                     event('pr5_transport_paths_canonicalized',task_id=task_id)
                 if planning and body.get('unresolved')!=[]:

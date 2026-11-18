@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import csv
+from collections import Counter
 import hashlib
 import io
 import json
+import os
 from pathlib import Path, PurePosixPath
 import sys
 import xml.etree.ElementTree as ET
@@ -114,6 +116,68 @@ def inspect_file(path):
     return {'path': path, 'size': size, 'sha256': digest(p), 'status': status, 'detail': detail}
 
 
+def item_archive(config):
+    """Observe item rows from a ZIP version without revalidating the design."""
+    from openpyxl import load_workbook
+
+    path = Path(config['archive'])
+    if not safe_file(path):
+        raise ValueError('Missing or unsafe delivery ZIP')
+    with path.open('rb') as delivery:
+        initial_stat = os.fstat(delivery.fileno())
+        archive_hash = hashlib.sha256()
+        for chunk in iter(lambda: delivery.read(1024 * 1024), b''):
+            archive_hash.update(chunk)
+        delivery.seek(0)
+        with zipfile.ZipFile(delivery) as archive:
+            names = archive.namelist()
+            if len(names) != len(set(names)) or any(
+                    PurePosixPath(n).is_absolute() or '..' in PurePosixPath(n).parts or '\\' in n for n in names):
+                raise ValueError('Unsafe or duplicate ZIP members')
+            workbook = archive.getinfo(config['workbook'])
+            reports = [archive.getinfo(name) for name in config['reports'] if name in names]
+            if not any(record.file_size for record in reports):
+                raise ValueError('The report must be in the ZIP')
+            if not 0 < workbook.file_size <= MAX_PARSE_BYTES:
+                raise ValueError('Workbook is empty or over the audit size limit')
+            book = load_workbook(io.BytesIO(archive.read(workbook)), read_only=True,
+                                 data_only=False, keep_links=False)
+        try:
+            if not set(config['sheets']).issubset(book.sheetnames):
+                raise ValueError('Workbook is missing required sheets')
+            hashes = {item: hashlib.sha256() for item in config['items']}
+            counts = Counter()
+            alternatives = {item: set() for item in hashes}
+            for sheet in book:
+                rows = sheet.iter_rows(values_only=True)
+                header = [str(value).strip().lower() for value in next(rows, ())]
+                if 'item_id' not in header:
+                    continue
+                item_column = header.index('item_id')
+                type_column = header.index('type') if sheet.title == 'Alternatives' and 'type' in header else None
+                for row in rows:
+                    item = row[item_column] if item_column < len(row) else None
+                    if not isinstance(item, str) or item.strip() not in hashes:
+                        continue
+                    item = item.strip()
+                    hashes[item].update(json.dumps([sheet.title, row], default=str).encode() + b'\n')
+                    if sheet.title == 'Items':
+                        counts[item] += 1
+                    if type_column is not None and type_column < len(row):
+                        alternatives[item].add(str(row[type_column]).strip())
+            for item, types in config['items'].items():
+                if counts[item] != 1 or not set(types).issubset(alternatives[item]):
+                    raise ValueError(f'Workbook is missing an Items row or required Alternatives for {item}')
+        finally:
+            book.close()
+        final_stat = path.stat()
+        if (initial_stat.st_ino, initial_stat.st_size, initial_stat.st_mtime_ns, initial_stat.st_ctime_ns) != (
+                final_stat.st_ino, final_stat.st_size, final_stat.st_mtime_ns, final_stat.st_ctime_ns):
+            raise ValueError('Delivery ZIP changed during item inspection')
+    return {'zip_sha256': archive_hash.hexdigest(),
+            'item_sha256': {item: value.hexdigest() for item, value in hashes.items()}}
+
+
 def run(spec, *, package=False):
     files = {f['path']: inspect_file(f['path']) for f in spec['files'] if f['kind'] != 'final_message'}
     archives = []
@@ -163,4 +227,10 @@ def run(spec, *, package=False):
 
 if __name__ == '__main__':
     value = json.loads(sys.argv[1])
-    print(json.dumps(run(value, package='--package' in sys.argv[2:])))
+    if '--item-archive' in sys.argv[2:]:
+        try:
+            print(json.dumps(item_archive(value)))
+        except (ValueError, KeyError, OSError, zipfile.BadZipFile) as exc:
+            print(json.dumps({'error': str(exc)}))
+    else:
+        print(json.dumps(run(value, package='--package' in sys.argv[2:])))

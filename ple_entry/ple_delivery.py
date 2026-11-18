@@ -42,6 +42,33 @@ def first_reads(instruction, root):
         if p != 'task.md'))
 
 
+def declared_item_updates(instruction, spec):
+    """Enable the item checkpoint only for an explicit workbook packaging protocol."""
+    if not re.search(r'\brewrit(?:e|ing) the zip after each item\b', instruction, re.I):
+        return None
+    archives = [f['path'] for f in spec['files']
+                if f['kind'] == 'binary' and PurePosixPath(f['path']).suffix.lower() == '.zip']
+    item_range = re.search(r'\bitems\s+`([A-Z]+)(\d+)`\s*(?:…|\.\.\.|–|to)\s*`\1(\d+)`', instruction)
+    workbook = re.search(r'\bcontaining\s+`([^`/\r\n]+\.xlsx)`', instruction)
+    report = re.search(r'\(`([^`/\r\n]+)\.md`,\s*`\.pdf`\s+or\s+`\.docx`\)', instruction)
+    types = re.search(r'conveyance types\s+([^()]+)\(site items\)\s+and\s+([^()]+)\(item ([A-Z]+\d+)\)', instruction)
+    sheets = list(dict.fromkeys(re.findall(r'\*\*([A-Za-z][A-Za-z0-9_]*)\*\*\s+—\s+', instruction)))
+    if len(archives) != 1 or not all((item_range, workbook, report, types)) or not {'Items', 'Alternatives'} <= set(sheets):
+        return None
+    prefix, first, last = item_range.groups()
+    numbers = range(int(first), int(last) + 1)
+    if not 1 <= len(numbers) <= 100 or len(first) != len(last):
+        return None
+    items = {prefix + str(n).zfill(len(first)): re.findall(r'`([^`]+)`', types[1]) for n in numbers}
+    if types[3] not in items:
+        return None
+    items[types[3]] = re.findall(r'`([^`]+)`', types[2])
+    if not all(items.values()):
+        return None
+    return {'archive': archives[0], 'workbook': workbook[1], 'sheets': sheets, 'items': items,
+            'reports': [report[1] + extension for extension in ('.md', '.pdf', '.docx')]}
+
+
 def normalize_spec(value, root):
     if not isinstance(value, dict) or not isinstance(value.get('files'), list):
         raise ValueError('Task importer must declare files')
@@ -218,7 +245,7 @@ class EvidenceSession:
 
 
 class Delivery:
-    def __init__(self, session, spec, required_reads, event):
+    def __init__(self, session, spec, required_reads, event, item_config=None):
         self.session, self.spec, self.required_reads, self.event = session, spec, required_reads, event
         self.lock = asyncio.Lock()
         self.script = '/tmp/fbs-delivery-' + uuid.uuid4().hex + '.py'
@@ -229,6 +256,10 @@ class Delivery:
         self.snapshot_saved = False
         self.snapshot_attempt = None
         self.snapshot_attempts = 0
+        self.item_config = item_config
+        self.item_baseline = None
+        self.item_latest = None
+        self.item_updates = []
 
     @property
     def names(self):
@@ -238,15 +269,28 @@ class Delivery:
     def aliases(self):
         return {f['path']: f['artifact'] for f in self.spec['files'] if f['kind'] != 'final_message'}
 
-    async def inspect(self, *, package=False):
+    async def run_audit(self, data, option=''):
         if not self.installed:
             await self.session.write_file(self.script, Path(__file__).with_name('container_audit.py').read_bytes())
             self.installed = True
         result = await self.session.exec('python3 ' + shlex.quote(self.script) + ' ' +
-            shlex.quote(json.dumps(self.spec)) + (' --package' if package else ''))
+            shlex.quote(json.dumps(data)) + option)
         if result.get('exit_code') != 0:
             raise ValueError('Task-container delivery inspection failed: ' + str(result.get('output', ''))[-1200:])
-        evidence = json.loads(result['output'])
+        return json.loads(result['output'])
+
+    async def inspect(self, *, package=False):
+        evidence = await self.run_audit(self.spec, ' --package' if package else '')
+        if self.item_config is not None and self.item_baseline is None and evidence['complete']:
+            try:
+                baseline = await self.inspect_item_archive()
+                archive = next(r for r in evidence['files'] if r['path'] == self.item_config['archive'])
+                if baseline['zip_sha256'] != archive['sha256']:
+                    raise ValueError('Delivery ZIP changed before the baseline was recorded')
+                self.item_baseline = self.item_latest = baseline
+            except ValueError as exc:
+                evidence['complete'] = False
+                evidence['item_baseline_error'] = str(exc)
         evidence['explicit_input_reads'] = list(self.session.reads)
         observed = [r['path'] for r in self.session.reads]
         # This describes host preloading, not a claim to observe every shell/MCP read.
@@ -260,6 +304,56 @@ class Delivery:
         if self.snapshot is not None and not self.snapshot_saved and evidence['complete']:
             await self.save_first_delivery(evidence)
         return evidence
+
+    async def inspect_item_archive(self):
+        observed = await self.run_audit(self.item_config, ' --item-archive')
+        if 'error' in observed:
+            raise ValueError(observed['error'])
+        return observed
+
+    async def record_item_update(self, item_id):
+        if self.item_config is None or not isinstance(item_id, str) or item_id not in self.item_config['items']:
+            raise ValueError('Unknown delivery item ID')
+        async with self.lock:
+            if self.item_latest is None:
+                raise ValueError('Write the complete provisional ZIP before recording any completed item')
+            observed = await self.inspect_item_archive()
+            if observed['zip_sha256'] == self.item_latest['zip_sha256']:
+                raise ValueError('The ZIP was not rewritten since the last recorded version')
+            changed = {item for item, version in observed['item_sha256'].items()
+                       if version != self.item_latest['item_sha256'][item]}
+            if changed != {item_id}:
+                raise ValueError('A checkpoint must contain changes to exactly the named item; observed: '
+                                 + ', '.join(sorted(changed)))
+            record = {'item': item_id, 'sequence': len(self.item_updates) + 1,
+                      'previous_zip_sha256': self.item_latest['zip_sha256'],
+                      'zip_sha256': observed['zip_sha256'], 'item_sha256': observed['item_sha256'][item_id]}
+            self.item_latest = observed
+            self.item_updates.append(record)
+            self.event('pr5_item_zip_recorded', **record,
+                       completed=len({r['item'] for r in self.item_updates}), required=len(self.item_config['items']))
+            return record
+
+    async def check_item_updates(self, evidence):
+        missing = set(self.item_config['items']) - {r['item'] for r in self.item_updates}
+        summary = {'baseline_zip_sha256': self.item_baseline['zip_sha256'] if self.item_baseline else None,
+                   'records': list(self.item_updates), 'missing_items': sorted(missing)}
+        evidence['item_updates'] = summary
+        if missing:
+            return 'Missing recorded ZIP updates for: ' + ', '.join(sorted(missing))
+        candidate = next(r for r in evidence['files'] if r['path'] == self.item_config['archive'])
+        if candidate.get('sha256') != self.item_latest['zip_sha256']:
+            try:
+                observed = await self.inspect_item_archive()
+            except ValueError as exc:
+                return str(exc)
+            if observed['zip_sha256'] != candidate.get('sha256'):
+                return 'Delivery ZIP changed during final inspection'
+            changed = sorted(item for item, version in observed['item_sha256'].items()
+                             if version != self.item_latest['item_sha256'][item])
+            if changed:
+                return 'Unrecorded item changes in the final ZIP: ' + ', '.join(changed)
+        return None
 
     async def save_first_delivery(self, evidence):
         files = [r for r in [*evidence['files'], *evidence['archives']]
@@ -387,7 +481,7 @@ class Delivery:
         return {'status': 'failed' if failures else 'passed',
                 'detail': '; '.join(failures) if failures else 'Transport syntax only; remote formats and engineering checked separately'}
 
-    async def publish(self, workspace):
+    async def publish(self, workspace, *, check_items=False):
         async with self.lock:
             local = self.local_check(workspace)
             if local['status'] != 'passed':
@@ -412,6 +506,10 @@ class Delivery:
                 failures.append('required initial input read order was not observed')
             if before != {n: hashlib.sha256((workspace/n).read_bytes()).hexdigest() for n in self.names}:
                 failures.append('FBS candidate changed while publishing')
+            if check_items and self.item_config is not None and not failures:
+                error = await self.check_item_updates(evidence)
+                if error:
+                    failures.append(error)
             status = 'failed' if failures else 'passed'
             # Format unknowns are explicit and passed to Root for actual parser verification.
             return {'status': status, 'detail': '; '.join(failures) if failures else json.dumps(evidence)}, evidence
