@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -139,7 +140,12 @@ def test_zip_audit_detects_actual_content_and_membership_defects(tmp_path, defec
     assert not evidence['complete']
 
 
-def test_first_read_order_and_early_zip_checkpoint_use_executed_evidence(tmp_path):
+@pytest.mark.parametrize('chunked', [False, True])
+def test_first_read_order_and_early_zip_checkpoint_use_executed_evidence(tmp_path, monkeypatch, chunked):
+    if chunked:
+        monkeypatch.setattr('ple_delivery.SNAPSHOT_CHUNK_BYTES', 128)
+        monkeypatch.setattr('ple_delivery.MAX_PARSE_BYTES', 128)
+
     async def run():
         root = tmp_path/'task'; root.mkdir()
         (root/'task.md').write_text('Read `handover/brief.md` first.')
@@ -151,10 +157,14 @@ def test_first_read_order_and_early_zip_checkpoint_use_executed_evidence(tmp_pat
         priority = first_reads(source, str(root))
         references = await adapter.source_materials(session, str(root), priority)
         assert list(references)[0] == 'provided/handover/brief.md'
+        reads_before_snapshot = list(session.reads)
         required = [task_path, *priority]
         assert [r['path'] for r in session.reads][:2] == required
-        delivery = Delivery(session, package_spec(root), required, lambda *a, **k: None)
+        events = []
+        delivery = Delivery(session, package_spec(root), required, lambda name, **fields: events.append(name))
+        delivery.snapshot = tmp_path/'first-delivery.zip'
         assert not (await delivery.checkpoint())['complete']
+        assert not delivery.snapshot.exists()
         await session.write_file(str(root/'output/rows.csv'), 'id,value\n1,2\n')
         await session.write_file(str(root/'output/note.md'), 'First actual candidate')
         evidence = await delivery.checkpoint()
@@ -166,6 +176,13 @@ def test_first_read_order_and_early_zip_checkpoint_use_executed_evidence(tmp_pat
         assert later['first_complete_host_operation'] == first
         with zipfile.ZipFile(root/'output/submission.zip') as z:
             assert z.read('note.md') == b'Improved candidate'
+        with zipfile.ZipFile(delivery.snapshot) as saved:
+            with zipfile.ZipFile(io.BytesIO(saved.read('submission.zip'))) as original:
+                assert original.read('note.md') == b'First actual candidate'
+            manifest = json.loads(saved.read('manifest.json'))
+            assert manifest['archives'][0]['file'] == 'submission.zip'
+        assert events.count('pr5_first_delivery_saved') == 1
+        assert session.reads == reads_before_snapshot
         delivery.required_reads = list(reversed(required))
         assert not (await delivery.inspect())['required_read_order']
     asyncio.run(run())

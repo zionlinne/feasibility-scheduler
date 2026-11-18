@@ -79,6 +79,26 @@ def test_missing_requirement_and_modified_source_are_blocked(tmp_path):
         run_legacy_doc(cfg)
 
 
+@pytest.mark.parametrize(('stop_on_stall', 'second_repair_total', 'repair_count', 'passed'), [
+    (True, 2, 2, False),
+    (False, 2, 3, True),
+    (True, 3, 3, True),
+])
+def test_stop_after_two_repairs_with_unchanged_files_and_checks(
+        tmp_path, monkeypatch, stop_on_stall, second_repair_total, repair_count, passed):
+    _, _, _, cfg = setup_task(tmp_path)
+    def repair(total):
+        return step({'a.json': '{"total":1}', 'b.json': json.dumps({'total': total}, separators=(',', ':'))})
+
+    client = FakeClient([step({'a.json': '{"total":1}'}), step({'b.json': '{"total":2}'}),
+                         repair(2), repair(second_repair_total), repair(1)])
+    monkeypatch.setattr('feasibility_scheduler.adapters.legacy_doc.create_client', lambda *a, **k: client)
+    outcome = run_legacy_doc(replace(cfg, contract_repair_limit=5, contract_stop_on_stall=stop_on_stall))
+    assert outcome.ok is passed
+    assert len(list(cfg.workdir.glob('contract-repair-*.json'))) == repair_count
+    assert ('contract_repair_stalled' in (cfg.workdir/'events.jsonl').read_text(encoding='utf-8')) is not passed
+
+
 def test_manual_obligation_remains_unverified(tmp_path, monkeypatch):
     _, plan, data, cfg = setup_task(tmp_path)
     plan["checks"].append({"id": "review", "kind": "manual", "note": "Review cost model against original sources", "requirements": ["R1"]})

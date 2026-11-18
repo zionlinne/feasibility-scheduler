@@ -52,6 +52,9 @@ jobs:
           git clone https://github.com/google-research/ple.git "$PLE_KIT"
           git -C "$PLE_KIT" checkout 8320f0402fdca9f42476607f72bcfd5271cd50c9
           docker info --format '{{.ServerVersion}}'
+          mkdir "$PLE_OPERATOR/artifact-client"
+          cp .github/actions/ple-evaluate/package{,-lock}.json "$PLE_OPERATOR/artifact-client/"
+          npm ci --prefix "$PLE_OPERATOR/artifact-client" --ignore-scripts --no-audit --no-fund
       - name: Verify API JSON and tool calls
         shell: bash
         run: |
@@ -68,17 +71,7 @@ jobs:
           hf auth login --format agent
           hf auth whoami
       - name: Run representative task with the actual PR5 FBS runner
-        shell: bash
-        run: |
-          set -euo pipefail
-          python "$GITHUB_WORKSPACE/cloud/live_progress.py" &
-          progress_pid=$!
-          trap 'kill "$progress_pid" 2>/dev/null || true; wait "$progress_pid" 2>/dev/null || true' EXIT
-          cd "$PLE_KIT"
-          uv run python eval/run.py "$GITHUB_WORKSPACE" \
-            --env-file "$PLE_OPERATOR/model.env" \
-            --tasks mv-conveyance-study --trials 1 --attempts 1 --out "$PLE_RUN" \
-            2>&1 | tee "$PLE_OPERATOR/evaluation.log"
+        uses: ./.github/actions/ple-evaluate
       - name: Collect serve metadata logs
         if: ${{ always() && env.PLE_RUN != '' }}
         shell: bash
@@ -103,6 +96,8 @@ jobs:
             ${{ runner.temp }}/ple-run/artifacts/
             ${{ runner.temp }}/ple-operator/evaluation.log
             ${{ runner.temp }}/ple-operator/api-check.log
+            ${{ runner.temp }}/ple-operator/live-progress.log
+            ${{ runner.temp }}/ple-operator/first-delivery.zip
             ${{ runner.temp }}/ple-operator/serve-logs/
       - name: Remove private credentials
         if: always()

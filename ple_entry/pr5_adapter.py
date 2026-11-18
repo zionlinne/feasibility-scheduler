@@ -236,6 +236,8 @@ class ModelWorker:
         router=TaskMcpTools(self.session,readonly=review or importing)
         messages=[{'role':'system','content':rules},{'role':'user','content':prompt}]
         operations=0
+        calls=0
+        phase_started=monotonic()
         phase = 'root' if review else 'import' if importing else 'plan' if planning else 'worker'
         while True:
             left=self.session.time_left()
@@ -244,7 +246,8 @@ class ModelWorker:
                     'max_completion_tokens':64000}
             if tools: kwargs.update(tools=tools,tool_choice='auto')
             started = monotonic()
-            event('pr5_model_call_started', phase=phase)
+            calls+=1
+            event('pr5_model_call_started', phase=phase, calls=calls, tools=operations)
             try:
                 response=await asyncio.wait_for(self.complete(phase,started,**kwargs),timeout=left)
             except Exception:
@@ -263,6 +266,8 @@ class ModelWorker:
                 result=parse_object(message.content or '')
                 if review and operations==0:
                     raise ValueError('Root did not inspect the actual task environment')
+                event('pr5_model_phase_finished', phase=phase, seconds=round(monotonic()-phase_started, 1),
+                      calls=calls, tools=operations)
                 return result
             for call in message.tool_calls:
                 fn=call.function;args=json.loads(fn.arguments);operations+=1
@@ -396,7 +401,7 @@ async def solve(session):
         cfg=LegacyDocConfig(task_input_path=source/'TASK_INPUT.json',task_md_path=source/'TASK.md',
           workdir=directory/'run',client_kind='native',native_bridge_dir=bridge,
           policy='rewrite',acceptance='loose',timeout_seconds=remaining,lease_seconds=remaining+60,
-          contract_repair_limit=repair_limit,
+           contract_repair_limit=repair_limit,contract_stop_on_stall=True,
           acceptance_profile=profile,external_checkers={
             'ple-format':delivery.local_check,'ple-package-evidence':package_checker,
             'ple-root-review':root_checker})

@@ -4,15 +4,22 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 import shlex
+import tempfile
 import uuid
+import zipfile
 
-from container_audit import payload_check
+from container_audit import MAX_PARSE_BYTES, payload_check
 
 TEXT_SUFFIXES = {'.csv', '.json', '.md', '.txt', '.py', '.xml', '.html', '.yaml', '.yml'}
 PROTECTED = {'tests', 'solutions', 'verifier', '.git'}
+FIRST_DELIVERY = Path('/tmp/fbs-first-delivery.zip')
+SNAPSHOT_CHUNK_BYTES = 9_000_000
+MAX_SNAPSHOT_FILE_BYTES = 95 << 20  # Matches the official PLE export limit.
+MAX_SNAPSHOT_BYTES = 256 << 20
 
 
 def clean_path(value, root):
@@ -218,6 +225,10 @@ class Delivery:
         self.installed = False
         self.first_complete_operation = None
         self.last_evidence = None
+        self.snapshot = FIRST_DELIVERY if os.getenv('FBS_PLE_SAVE_FIRST_DELIVERY') == '1' else None
+        self.snapshot_saved = False
+        self.snapshot_attempt = None
+        self.snapshot_attempts = 0
 
     @property
     def names(self):
@@ -246,7 +257,80 @@ class Delivery:
                        metric='host tool operations, not model turns or official step counts')
         evidence['first_complete_host_operation'] = self.first_complete_operation
         self.last_evidence = evidence
+        if self.snapshot is not None and not self.snapshot_saved and evidence['complete']:
+            await self.save_first_delivery(evidence)
         return evidence
+
+    async def save_first_delivery(self, evidence):
+        files = [r for r in [*evidence['files'], *evidence['archives']]
+                 if PurePosixPath(r['path']).suffix.lower() == '.zip']
+        if not files:
+            return
+        signature = tuple(r['sha256'] for r in files)
+        if signature != self.snapshot_attempt:
+            self.snapshot_attempt = signature
+            self.snapshot_attempts = 0
+        if self.snapshot_attempts >= 2:
+            return
+        self.snapshot_attempts += 1
+        remote = self.session.raw
+        try:
+            if sum(r['size'] for r in files) > MAX_SNAPSHOT_BYTES:
+                raise ValueError('ZIPs exceed the official task export size limit')
+            with tempfile.TemporaryDirectory(dir=self.snapshot.parent) as directory:
+                bundle = Path(directory) / 'first-delivery.zip'
+                baseline = []
+                with zipfile.ZipFile(bundle, 'w', compression=zipfile.ZIP_STORED) as archive:
+                    for index, record in enumerate(files, start=1):
+                        name = PurePosixPath(record['path']).name
+                        member = f'{index:02d}/{name}' if len(files) > 1 else name
+                        await self.write_snapshot_member(remote, archive, member, record)
+                        baseline.append({'file': member, 'sha256': record['sha256'], 'bytes': record['size']})
+                    archive.writestr('manifest.json', json.dumps({'archives': baseline}, indent=2) + '\n')
+                bundle.replace(self.snapshot)
+            self.snapshot_saved = True
+            self.event('pr5_first_delivery_saved')
+        except Exception as exc:
+            self.event('pr5_first_delivery_save_failed', error_type=type(exc).__name__)
+
+    async def write_snapshot_member(self, remote, archive, member, record):
+        path, size = record['path'], record['size']
+        if size > MAX_SNAPSHOT_FILE_BYTES:
+            raise ValueError('ZIP exceeds the official export size limit')
+        digest = hashlib.sha256()
+        total = 0
+        chunks = [path]
+        directory = None
+        try:
+            if size > SNAPSHOT_CHUNK_BYTES:
+                directory = '/tmp/fbs-snapshot-' + uuid.uuid4().hex
+                prefix = directory + '/chunk-'
+                command = (f'mkdir -m 700 -- {directory} && split -b {SNAPSHOT_CHUNK_BYTES} -d -a 3 '
+                           f'-- {shlex.quote(path)} {prefix}')
+                result = await remote.exec(command)
+                if result.get('exit_code') != 0:
+                    raise ValueError('Could not stage ZIP chunks')
+                chunks = [f'{prefix}{index:03d}' for index in range((size + SNAPSHOT_CHUNK_BYTES - 1)
+                                                                     // SNAPSHOT_CHUNK_BYTES)]
+            with archive.open(member, 'w') as output:
+                for chunk in chunks:
+                    data = await remote.read_file(chunk)
+                    total += len(data)
+                    digest.update(data)
+                    output.write(data)
+            if total != size or digest.hexdigest() != record['sha256']:
+                raise ValueError('ZIP changed while saving the checkpoint')
+            if size > MAX_PARSE_BYTES:
+                # The delivery audit deliberately skips parsing ZIP bodies over its memory budget.
+                with archive.open(member) as copy, zipfile.ZipFile(copy) as delivery_zip:
+                    names = delivery_zip.namelist()
+                    if not names or len(names) != len(set(names)) or any(
+                            PurePosixPath(name).is_absolute() or '..' in PurePosixPath(name).parts or '\\' in name
+                            for name in names):
+                        raise ValueError('Invalid ZIP members')
+        finally:
+            if directory is not None:
+                await remote.exec(f'rm -rf -- {directory}')
 
     async def checkpoint(self):
         # A checkpoint packages only files already written by the worker. No placeholders.

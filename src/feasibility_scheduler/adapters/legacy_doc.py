@@ -110,6 +110,7 @@ class LegacyDocConfig:
     acceptance_profile: Mapping[str, Any] | None = None
     integration_files: tuple[str, ...] | None = None
     planning_standard: str = "modular-v1"
+    contract_stop_on_stall: bool = False
 
 
 
@@ -960,6 +961,7 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
         else:
             executor = PromptFromPayloadExecutor(tasks, **exec_kwargs)
         executor.contract_repair_limit = cfg.contract_repair_limit
+        executor.contract_stop_on_stall = cfg.contract_stop_on_stall
         outcome = executor.run()
         rewrite_history = list(getattr(executor, "rewrite_history", []))
     finally:

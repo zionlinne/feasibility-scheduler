@@ -159,6 +159,16 @@ class ContractExecutionMixin:
     """Keep scheduler transitions in Executor; retry delivery before its final acceptance."""
 
     contract_repair_limit = 1
+    contract_stop_on_stall = False
+
+    def _repair_artifacts(self, paths):
+        workspace = self.acceptor.sink.workspace
+        artifacts = {}
+        for path in paths:
+            target = (workspace / path).resolve()
+            target.relative_to(workspace.resolve())
+            artifacts[path] = target.read_text(encoding='utf-8') if target.is_file() else None
+        return artifacts
 
     async def _send(self, task_id: str, key: str) -> Any:
         task = self._task_by_id[task_id]
@@ -210,17 +220,15 @@ class ContractExecutionMixin:
         previous = sum(e.type == "candidate_selected" and e.component == "contract_adapter"
                        and e.task_id == task_id for e in self.log.events())
         limit = 0 if task.payload.get("contract_integration") or task.payload.get("integration_required") else self.contract_repair_limit
+        unchanged = 0
         for revision in range(previous + 1, limit + 1):
             if report is None or report.passed or report.error or not response.ok:
                 break
             paths = self.acceptor.repair_files(task)
             if not paths:
                 break
-            artifacts = {}
-            for path in paths:
-                target = (self.acceptor.sink.workspace / path).resolve()
-                target.relative_to(self.acceptor.sink.workspace.resolve())
-                artifacts[path] = target.read_text(encoding="utf-8") if target.is_file() else None
+            artifacts = self._repair_artifacts(paths)
+            previous_checks = self.acceptor.results.get(task_id)
             feedback = {"task_id": task_id, "revision": revision, "errors": list(report.errors),
                         "repair_files": paths, "artifacts": artifacts,
                         "read_only_artifacts": self.acceptor.read_context(task, paths)}
@@ -247,6 +255,21 @@ class ContractExecutionMixin:
             task = replace(task, payload={**task.payload, "contract_repair_files": paths})
             self._task_by_id[task_id] = task
             report = run_acceptance(self.acceptor, task, response)
+            if self.contract_stop_on_stall:
+                checks = self.acceptor.results.get(task_id)
+                if (report is not None and not report.passed and not report.error
+                        and previous_checks and checks is not previous_checks and checks
+                        and {(r['id'], r['status']) for r in checks}
+                            == {(r['id'], r['status']) for r in previous_checks}
+                        and artifacts == self._repair_artifacts(paths)):
+                    unchanged += 1
+                else:
+                    unchanged = 0
+                if unchanged == 2:
+                    self.log.record('contract_repair_stalled', component='contract_adapter', task_id=task_id,
+                                    decision_reason='Consecutive repairs left the artifacts and check outcomes unchanged',
+                                    details={'revision': revision, 'unchanged_repairs': unchanged})
+                    break
         if report is not None:
             self.acceptor.cached[(task_id, id(response))] = report
         await super()._accept(task_id, response)
