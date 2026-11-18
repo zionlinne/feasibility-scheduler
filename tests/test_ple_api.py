@@ -1,11 +1,16 @@
 """API transport probes use synthetic replies, never a benchmark answer."""
+import asyncio
 import importlib.util
 import io
 import json
 from pathlib import Path
+import sys
+from time import monotonic
 from types import SimpleNamespace
 import urllib.error
 
+import httpx2 as httpx
+from openai import AsyncOpenAI, OpenAI
 import pytest
 
 PATH=Path(__file__).resolve().parents[1]/'cloud/check_api.py'
@@ -59,3 +64,80 @@ def test_probe_rejects_multiline_key_without_connecting():
     def forbidden(*args,**kwargs): raise AssertionError('Must not connect')
     with pytest.raises(ValueError,match='missing or invalid'):
         api.probe(submission(),'key\nOTHER=bad',request=forbidden)
+
+
+def stream_reply(deltas, *, finish='stop'):
+    def chunk(choices, **fields):
+        return {'id': 'fixture', 'object': 'chat.completion.chunk', 'created': 1,
+                'model': 'fixture-model', 'choices': choices, **fields}
+
+    chunks = [chunk([{'index': 0, 'delta': delta, 'finish_reason': None}]) for delta in deltas]
+    if finish:
+        chunks.append(chunk([{'index': 0, 'delta': {}, 'finish_reason': finish}]))
+        chunks.append(chunk([], usage={'prompt_tokens': 10, 'completion_tokens': 5,
+                                      'total_tokens': 15, 'prompt_tokens_details': {'cached_tokens': 8}}))
+    sse = ''.join(f'data: {json.dumps(item)}\n\n' for item in chunks)
+    if finish:
+        sse += 'data: [DONE]\n\n'
+    return httpx.Response(200, headers={'content-type': 'text/event-stream'}, text=sse)
+
+
+def tool_reply():
+    return stream_reply([
+        {'role': 'assistant', 'tool_calls': [{'index': 0, 'type': 'function', 'id': 'echo-1',
+                                             'function': {'name': 'api_echo', 'arguments': '{"value":'}}]},
+        {'tool_calls': [{'index': 0, 'function': {'arguments': '"API_READY"}'}}]},
+    ], finish='tool_calls')
+
+
+def test_streaming_probe_roundtrips_split_tool_arguments_and_usage():
+    def send(req):
+        body = json.loads(req.content)
+        assert body['stream'] is True
+        assert body['stream_options'] == {'include_usage': True}
+        if body.get('tools'):
+            return tool_reply()
+        assert body['messages'][-1]['tool_call_id'] == 'echo-1'
+        assert json.loads(body['messages'][-1]['content']) == {'value': 'API_READY'}
+        return stream_reply([{'role': 'assistant', 'content': '{"status":'}, {'content': '"API_READY"}'}])
+
+    with OpenAI(api_key='fixture', base_url=submission().model.endpoint,
+                http_client=httpx.Client(transport=httpx.MockTransport(send))) as client:
+        result = api.probe(submission(), 'fixture', stream_client=client)
+    assert result['ok'] and result['calls'] == 2 and result['tokens'] == {'input': 20, 'output': 10}
+
+
+@pytest.mark.parametrize('truncated', [False, True])
+def test_async_worker_assembles_stream_before_accepting_tools(monkeypatch, capsys, truncated):
+    monkeypatch.syspath_prepend(str(PATH.parents[1] / 'ple_entry'))
+    monkeypatch.setenv('OPENAI_API_KEY', 'fixture')
+    monkeypatch.setenv('MODEL_NAME', 'fixture-model')
+    monkeypatch.setenv('FBS_PLE_MODEL_STREAM', '1')
+    from pr5_adapter import ModelWorker
+
+    def send(req):
+        assert json.loads(req.content)['stream_options'] == {'include_usage': True}
+        if truncated:
+            return stream_reply([{'role': 'assistant', 'content': '{"private-output":'}], finish=None)
+        return tool_reply()
+
+    async def complete():
+        worker = ModelWorker(SimpleNamespace(time_left=lambda: 60))
+        await worker.client.close()
+        async with AsyncOpenAI(api_key='fixture', base_url=submission().model.endpoint,
+                               http_client=httpx.AsyncClient(transport=httpx.MockTransport(send))) as client:
+            worker.client = client
+            return await worker.complete('worker', monotonic(), model=worker.model,
+                                         messages=[{'role': 'user', 'content': 'Call api_echo'}])
+
+    if truncated:
+        with pytest.raises(ValueError, match='ended before the completion finished'):
+            asyncio.run(complete())
+    else:
+        result = asyncio.run(complete())
+        call = result.choices[0].message.tool_calls[0]
+        assert call.id == 'echo-1' and json.loads(call.function.arguments) == {'value': 'API_READY'}
+        assert result.usage.prompt_tokens_details.cached_tokens == 8
+    updates = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert len(updates) == 1 and updates[0]['event'] == 'pr5_model_stream_received'
+    assert updates[0].keys() == {'event', 'phase', 'seconds'}

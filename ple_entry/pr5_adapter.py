@@ -135,7 +135,25 @@ class ModelWorker:
         self.session=session
         self.client=AsyncOpenAI(max_retries=3,timeout=max(1,session.time_left() or 21600))
         self.model=os.environ['MODEL_NAME']
+        self.stream_model=os.environ.get('FBS_PLE_MODEL_STREAM') == '1'
         self.delivery=delivery
+
+    async def complete(self, phase, started, **kwargs):
+        completions = self.client.chat.completions
+        if not self.stream_model:
+            return await completions.create(**kwargs)
+
+        next_update = started
+        async with completions.stream(**kwargs, stream_options={'include_usage': True}) as stream:
+            async for update in stream:
+                if update.type == 'chunk' and monotonic() >= next_update:
+                    now = monotonic()
+                    event('pr5_model_stream_received', phase=phase, seconds=round(now - started, 1))
+                    next_update = now + 30
+            response = await stream.get_final_completion()
+        if not response.choices or not response.choices[0].finish_reason:
+            raise ValueError('Model stream ended before the completion finished')
+        return response
 
     async def run(self,prompt,*,planning=False,review=False,importing=False,protocol_feedback=False):
         rules=(('You import task I/O for the PR5 adapter. ' if importing else
@@ -228,7 +246,7 @@ class ModelWorker:
             started = monotonic()
             event('pr5_model_call_started', phase=phase)
             try:
-                response=await asyncio.wait_for(self.client.chat.completions.create(**kwargs),timeout=left)
+                response=await asyncio.wait_for(self.complete(phase,started,**kwargs),timeout=left)
             except Exception:
                 event('pr5_model_call_failed', phase=phase, seconds=round(monotonic()-started, 1))
                 raise

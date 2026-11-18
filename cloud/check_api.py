@@ -17,7 +17,7 @@ def settings(entry):
     return spec.load(Path(entry))
 
 
-def probe(sub, key, *, request=urllib.request.urlopen):
+def probe(sub, key, *, request=urllib.request.urlopen, stream_client=None):
     if not key or any(c in key for c in '\r\n\x00'):
         raise ValueError('MODEL_API_KEY is missing or invalid')
     model=sub.model.name
@@ -30,10 +30,19 @@ def probe(sub, key, *, request=urllib.request.urlopen):
     def ask(**options):
         body={'model':model,'messages':messages,'reasoning_effort':'high',
               'max_completion_tokens':4096,**options}
-        req=urllib.request.Request(endpoint,json.dumps(body).encode(),
-            {'Content-Type':'application/json','Authorization':'Bearer '+key})
-        with request(req,timeout=180) as reply:
-            data=json.load(reply)
+        if stream_client is None:
+            req=urllib.request.Request(endpoint,json.dumps(body).encode(),
+                {'Content-Type':'application/json','Authorization':'Bearer '+key})
+            with request(req,timeout=180) as reply:
+                data=json.load(reply)
+        else:
+            with stream_client.chat.completions.stream(**body, stream_options={'include_usage': True}) as stream:
+                response=stream.get_final_completion()
+            if not response.choices or not response.choices[0].finish_reason:
+                raise ValueError('Model stream ended before the completion finished')
+            if response.usage is None:
+                raise ValueError('Model stream did not include token usage')
+            data=response.model_dump(exclude_none=True)
         for total,field in [('input','prompt_tokens'),('output','completion_tokens')]:
             usage[total]+=data.get('usage',{}).get(field,0) or 0
         return data['choices'][0]['message']
@@ -67,11 +76,19 @@ def main():
             if not text.startswith('MODEL_API_KEY=') or text.count('\n')!=1 or not text.endswith('\n'):
                 raise ValueError('Invalid private model env file')
             key=text[len('MODEL_API_KEY='):-1]
-        result=probe(settings(args.entry),key)
+        sub=settings(args.entry)
+        if getattr(sub, 'env', {}).get('FBS_PLE_MODEL_STREAM') == '1':
+            from openai import OpenAI
+            with OpenAI(api_key=key,base_url=sub.model.endpoint,timeout=180,max_retries=0) as client:
+                result=probe(sub,key,stream_client=client)
+            result['stream']=True
+        else:
+            result=probe(sub,key)
     except Exception as exc:
         # Do not expose a provider response body, URL, request headers or key.
         result={'ok':False,'error_type':type(exc).__name__}
         if isinstance(exc,urllib.error.HTTPError): result['http_status']=exc.code
+        elif type(getattr(exc,'status_code',None)) is int: result['http_status']=exc.status_code
     print(json.dumps(result),flush=True)
     return 0 if result['ok'] else 1
 

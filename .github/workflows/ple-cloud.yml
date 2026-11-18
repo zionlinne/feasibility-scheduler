@@ -57,7 +57,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "$PLE_KIT"
-          PYTHONPATH="$PLE_KIT" uv run --with pyyaml python "$GITHUB_WORKSPACE/cloud/check_api.py" "$GITHUB_WORKSPACE" \
+          PYTHONPATH="$PLE_KIT" uv run --with pyyaml --with openai==3.26.1 python "$GITHUB_WORKSPACE/cloud/check_api.py" "$GITHUB_WORKSPACE" \
             --env-file "$PLE_OPERATOR/model.env" \
             2>&1 | tee "$PLE_OPERATOR/api-check.log"
       - name: Authorize approved Hugging Face account

@@ -16,6 +16,10 @@ def test_public_progress_only_emits_allowed_summary_fields():
     assert progress.summary(json.dumps({
         'event': 'pr5_native_dispatch', 'task_id': '__contract_composition__', 'repair_round': 3,
     })) == 'Composition repair 3 dispatched'
+    assert progress.summary(json.dumps({
+        'event': 'pr5_model_stream_received', 'phase': 'worker', 'seconds': 10,
+        'content': 'private fragment',
+    })) == 'Worker API stream receiving data at 10.0s'
 
 
 def test_model_cache_totals_use_input_weighted_rate():

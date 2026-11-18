@@ -64,11 +64,13 @@ class Progress:
         phase = PHASES[phase]
         if kind == 'pr5_model_call_started':
             return f'{phase} API call started'
-        if kind not in ('pr5_model_call_finished', 'pr5_model_call_failed'):
+        if kind not in ('pr5_model_stream_received', 'pr5_model_call_finished', 'pr5_model_call_failed'):
             return None
         seconds = event.get('seconds')
         if type(seconds) not in (int, float) or not 0 <= seconds < math.inf:
             return None
+        if kind == 'pr5_model_stream_received':
+            return f'{phase} API stream receiving data at {seconds:.1f}s'
         if kind == 'pr5_model_call_failed':
             return f'{phase} API call failed after {seconds:.1f}s'
         input_tokens = count(event.get('input_tokens'))
