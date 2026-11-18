@@ -1,1 +1,0 @@
-{"tasks":[{"id":"design","dependencies":[]},{"id":"build","dependencies":["design"]},{"id":"ship","dependencies":["build"]}],"durations":{"design":2,"build":4,"ship":3},"deadlines":{"ship":7}}
