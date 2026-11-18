@@ -1,13 +1,15 @@
 param(
     [Parameter(Mandatory=$true)][string]$RequestPath,
-    [Parameter(Mandatory=$true)][string]$OutputPath
+    [Parameter(Mandatory=$true)][string]$OutputPath,
+    [string]$ModelName
 )
 $ErrorActionPreference = 'Stop'
 $requestData = Get-Content -LiteralPath $RequestPath -Raw | ConvertFrom-Json
 $publicBytes = [Text.Encoding]::UTF8.GetBytes($requestData.public_key_pem)
 $publicHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($publicBytes)).ToLowerInvariant()
 if ($publicHash -ne $requestData.public_key_sha256) { throw 'Upload request fingerprint mismatch.' }
-Write-Host "Run $($requestData.run_id): 88API / gpt-6.1-sol"
+$modelLabel = if ($ModelName) { " / $ModelName" } else { '' }
+Write-Host "Run $($requestData.run_id): 88API$modelLabel"
 Write-Host 'Enter the key below. Input is hidden; the key is not saved as plain text.'
 $secureKey = Read-Host '88API key' -AsSecureString
 $rsa = [Security.Cryptography.RSA]::Create()
