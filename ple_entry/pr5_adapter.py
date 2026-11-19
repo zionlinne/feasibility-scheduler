@@ -173,7 +173,7 @@ class ModelWorker:
           'Return exactly the requested JSON object, without Markdown. '
           'Do not ask the operator to do work or create a separate planning workflow. ')
         if protocol_feedback:
-            rules+=('Return only the requested JSON additions to missing contract fields. '
+            rules+=('Return only the requested JSON field additions and explicitly authorized local binding correction. '
                     'Do not regenerate the full contract, solve the engineering task, use tools, '
                     'weaken existing obligations, or erase real blockers. Values must be grounded '
                     'in the supplied task and the existing contract. ')

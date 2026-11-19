@@ -345,6 +345,81 @@ def test_protocol_feedback_fills_missing_fields_then_passes_original_pr5_validat
     assert observations[0][1]['valid'] is False and observations[-1][1]['valid'] is True
 
 
+@pytest.mark.parametrize('new_path', ['a.py', 'c.py'])
+def test_protocol_corrects_deferred_receipt_binding_without_rewriting_the_root(new_path):
+    from dataclasses import replace
+    from ple_contract import preflight, prepare_contract
+
+    tasks, plan = contract_fixture()
+    profile = {'id': 'fixture', 'categories': [
+        {'id': 'delivery', 'description': 'Delivery evidence', 'applicable': True,
+         'allowed_kinds': ['file_exists']}]}
+    tasks = [replace(task, payload={**task.payload, 'acceptance_profile': profile}) for task in tasks]
+    plan['checks'][0]['id'] = 'receipt-present'
+    old_assignments = [
+        {'id': 'root-delivery', 'scope': 'root', 'owners': ['__contract_composition__'],
+         'category': 'delivery', 'requirements': ['R1'], 'checks': ['receipt-present', 'b.py']},
+        {'id': 'second-delivery', 'scope': 'local', 'owners': ['b'],
+         'category': 'delivery', 'requirements': ['R1'], 'checks': ['c.py']},
+    ]
+    plan['acceptance_assignments'] = old_assignments
+    module = plan['modules'][0]
+    module['local_checks'] = ['receipt-present']
+    del module['acceptance_limitations']
+    original_errors = preflight(plan, tasks, 'Compare offers', {})
+    assert any('receipt-present is not executable' in error for error in original_errors)
+    assert any('acceptance_limitations' in error for error in original_errors)
+
+    class Worker:
+        calls = 0
+
+        async def run(self, prompt, **kwargs):
+            self.calls += 1
+            assert 'LOCAL BINDING CORRECTION for module "a"' in prompt
+            assert 'replace the rejected local reference "receipt-present"' in prompt
+            return {
+                'additions': [{'path': ['modules', 0, 'acceptance_limitations'],
+                               'value': 'Existence only. Root compares evidence.'}],
+                'local_binding': {'local_checks': ['local-receipt'], 'new_file_check': {
+                    'id': 'local-receipt', 'path': new_path, 'requirements': ['R1'],
+                    'category': 'delivery'}},
+                'unresolved': [],
+            }
+
+    worker = Worker()
+    result = asyncio.run(prepare_contract(plan, worker=worker, tasks=tasks,
+        source='Compare offers', checkers={}, aliases={}, canonicalize=adapter.canonicalize_paths,
+        event=lambda *a, **k: None))
+    assert worker.calls == 1 and module['local_checks'] == ['receipt-present']
+    if new_path == 'c.py':
+        assert result is plan
+    else:
+        assert preflight(result, tasks, 'Compare offers', {}) == []
+        assert result['checks'][:-1] == plan['checks']
+        assert result['acceptance_assignments'][:-1] == old_assignments
+        assert result['modules'][0]['local_checks'] == ['local-receipt']
+        assert result['modules'][1] == plan['modules'][1]
+
+
+def test_protocol_corrects_foreign_local_reference_using_an_existing_check():
+    from ple_contract import preflight, prepare_contract
+
+    tasks, plan = contract_fixture()
+    plan['modules'][0]['local_checks'] = ['a.py', 'c.py']
+    errors = preflight(plan, tasks, 'Compare offers', {})
+    assert len(errors) == 1 and 'c.py is not executable' in errors[0]
+
+    class Worker:
+        async def run(self, prompt, **kwargs):
+            return {'additions': [], 'local_binding': {'local_checks': ['a.py', 'b.py']}}
+
+    result = asyncio.run(prepare_contract(plan, worker=Worker(), tasks=tasks,
+        source='Compare offers', checkers={}, aliases={}, canonicalize=adapter.canonicalize_paths,
+        event=lambda *a, **k: None))
+    assert preflight(result, tasks, 'Compare offers', {}) == []
+    assert result['checks'] == plan['checks']
+
+
 def test_real_blockers_do_not_trigger_a_format_request_or_get_cleared():
     from ple_contract import prepare_contract
     tasks, plan = contract_fixture()
