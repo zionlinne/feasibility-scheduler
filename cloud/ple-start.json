@@ -1,6 +1,6 @@
 {
   "task": "mv-conveyance-study",
   "mode": "api-encrypted-upload",
-  "launch_attempt": 14,
-  "reason": "Rerun the electrical task with scoped local check binding correction"
+  "launch_attempt": 15,
+  "reason": "Rerun the electrical task with normalized read paths and one validated replan"
 }
