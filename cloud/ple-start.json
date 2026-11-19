@@ -1,6 +1,0 @@
-{
-  "task": "mv-conveyance-study",
-  "mode": "api-encrypted-upload",
-  "launch_attempt": 18,
-  "reason": "Retry cloud electrical PLE after a transient upstream API preflight failure"
-}
