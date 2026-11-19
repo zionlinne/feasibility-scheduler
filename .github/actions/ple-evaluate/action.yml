@@ -1,5 +1,0 @@
-name: Run PLE and upload the first complete delivery
-description: Save the first complete delivery while the evaluation continues.
-runs:
-  using: node24
-  main: main.cjs
