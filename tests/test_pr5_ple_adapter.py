@@ -333,6 +333,7 @@ def test_protocol_feedback_fills_missing_fields_then_passes_original_pr5_validat
         calls = 0
         async def run(self, prompt, **kwargs):
             self.calls += 1
+            assert 'json' in prompt.lower()
             assert all(field in prompt for field in ('composition.method', 'composition.counterexample_review', 'modules[0].boundary'))
             return {'additions':[
                 {'path':['composition','method'],'value':valid['composition']['method']},

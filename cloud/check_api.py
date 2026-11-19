@@ -22,7 +22,7 @@ def probe(sub, key, *, request=urllib.request.urlopen, stream_client=None):
         raise ValueError('MODEL_API_KEY is missing or invalid')
     model=sub.model.name
     endpoint=sub.model.endpoint.rstrip('/')+'/chat/completions'
-    messages=[{'role':'user','content':'Call api_echo with value API_READY, then return exactly {"status":"API_READY"}.'}]
+    messages=[{'role':'user','content':'Call api_echo with value API_READY, then return this JSON object exactly: {"status":"API_READY"}.'}]
     function={'name':'api_echo','description':'Echo the supplied probe string.',
               'parameters':{'type':'object','properties':{'value':{'type':'string'}},'required':['value']}}
     usage={'input':0,'output':0}

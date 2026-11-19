@@ -190,7 +190,7 @@ async def prepare_contract(candidate, *, worker, tasks, source, checkers, aliase
     if not slots:
         return candidate  # Semantic/dependency/capability failures are not missing-field repairs.
     prompt = (
-        'Fill the listed missing fields of this same PR5 contract. Return ONLY '
+        'Fill the listed missing fields of this same PR5 contract. Return only this JSON object: '
         '{"additions":[{"path":["composition","counterexample_review"],"value":"task-grounded text"}],'
         '"unresolved":[]}. The example path is illustrative: use ONLY the actual allowed paths below. '
         'Do not return or regenerate the entire plan. Host code applies your supplied values '

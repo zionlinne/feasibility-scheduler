@@ -32,6 +32,7 @@ def test_probe_sends_actual_model_and_roundtrips_tool_result():
             message={'role':'assistant','content':None,'tool_calls':[
                 {'id':'echo-1','type':'function','function':{'name':'api_echo','arguments':'{"value":"API_READY"}'}}]}
         else:
+            assert 'json' in body['messages'][0]['content'].lower()
             assert body['messages'][-1]['tool_call_id']=='echo-1'
             assert json.loads(body['messages'][-1]['content'])=={'value':'API_READY'}
             message={'role':'assistant','content':'{"status":"API_READY"}'}
@@ -98,6 +99,7 @@ def test_streaming_probe_roundtrips_split_tool_arguments_and_usage():
         if body.get('tools'):
             return tool_reply()
         assert body['response_format'] == {'type': 'json_object'}
+        assert 'json' in body['messages'][0]['content'].lower()
         assert body['messages'][-1]['tool_call_id'] == 'echo-1'
         assert json.loads(body['messages'][-1]['content']) == {'value': 'API_READY'}
         return stream_reply([{'role': 'assistant', 'content': '{"status":'}, {'content': '"API_READY"}'}])
