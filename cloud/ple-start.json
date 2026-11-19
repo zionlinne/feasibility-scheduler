@@ -1,6 +1,0 @@
-{
-  "task": "mv-conveyance-study",
-  "mode": "api-encrypted-upload",
-  "launch_attempt": 20,
-  "reason": "Retry the electrical PLE task after the prior preflight 503"
-}
