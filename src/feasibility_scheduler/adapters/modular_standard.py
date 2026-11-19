@@ -6,13 +6,6 @@ from .contract_checks import check_paths
 STANDARD = "modular-v1"
 
 
-class LocalCheckBoundaryError(ValueError):
-    def __init__(self, module_id, check_id):
-        self.module_id = module_id
-        self.check_id = check_id
-        super().__init__(f"module {module_id}: check {check_id} is not executable within its local boundary")
-
-
 def ownership_catalog(tasks, plan):
     owned = {t.id: list(t.payload.get("owned_files", ())) for t in tasks}
     owned.update({c["id"]: list(c["owned_files"])
@@ -59,7 +52,7 @@ def validate_modular_standard(plan, tasks):
             # Workspace suites remain root gates. Never pretend they are local evidence.
             if (cid in deferred or check["kind"] in {"manual", "external"}
                     or not paths.intersection(owned[mid]) or not paths <= set(owned[mid]) | references):
-                raise LocalCheckBoundaryError(mid, cid)
+                raise ValueError(f"module {mid}: check {cid} is not executable within its local boundary")
         if all(checks[cid]["kind"] in {"file_exists", "text_contains"} for cid in ids):
             if not isinstance(module.get("acceptance_limitations"), str) or not module["acceptance_limitations"].strip():
                 raise ValueError(f"module {mid}: structural-only checks require explicit acceptance_limitations")

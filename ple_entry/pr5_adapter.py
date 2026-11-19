@@ -15,7 +15,7 @@ from feasibility_scheduler.adapters.legacy_doc import LegacyDocConfig, run_legac
 from mcp_tools import TaskMcpTools, TOOLS as MCP_TOOLS
 from ple_delivery import (Delivery, EvidenceSession, declared_item_updates, declared_package, first_reads,
                           normalize_spec, task_root)
-from ple_contract import bind_root_repairs, prepare_contract
+from ple_contract import prepare_contract
 
 
 def event(kind, **values):
@@ -87,7 +87,11 @@ def canonicalize_paths(body,aliases,*,planning):
     """Translate only declared artifact aliases, never predicate values or text."""
     body=json.loads(json.dumps(body))
     def paths(obj,key):
-        if isinstance(obj.get(key),list): obj[key]=[aliases.get(x,x) if isinstance(x,str) else x for x in obj[key]]
+        if isinstance(obj.get(key),list):
+            mapped = [aliases.get(x,x) if isinstance(x,str) else x for x in obj[key]]
+            if key == 'read_paths' and all(isinstance(path, str) for path in mapped):
+                mapped = list(dict.fromkeys(mapped))
+            obj[key] = mapped
     if planning:
         checks=body.get('checks')
         for check in checks if isinstance(checks,list) else []:
@@ -161,7 +165,7 @@ class ModelWorker:
             raise ValueError('Model stream ended before the completion finished')
         return response
 
-    async def run(self,prompt,*,planning=False,review=False,importing=False,protocol_feedback=False,owned=(),continuing=False):
+    async def run(self,prompt,*,planning=False,review=False,importing=False,owned=(),continuing=False):
         rules=(('You import task I/O for the PR5 adapter. ' if importing else
                 'You execute a request dispatched by the existing PR5 FBS harness. ')+
           'Follow its current contract, ownership, checks and output JSON schema. '
@@ -172,12 +176,7 @@ class ModelWorker:
           'The original task documents are available through the official task tools. '
           'Return exactly the requested JSON object, without Markdown. '
           'Do not ask the operator to do work or create a separate planning workflow. ')
-        if protocol_feedback:
-            rules+=('Return only the requested JSON field additions and explicitly authorized local binding correction. '
-                    'Do not regenerate the full contract, solve the engineering task, use tools, '
-                    'weaken existing obligations, or erase real blockers. Values must be grounded '
-                    'in the supplied task and the existing contract. ')
-        elif importing:
+        if importing:
             rules+=('Import task I/O only; do not solve or design a workflow. Read the brief and '
                     'only the referenced material needed to identify actual requested outputs. '
                     'Return {"files":[{"path":"absolute task-container path","kind":"text|binary|final_message"}],'
@@ -248,7 +247,7 @@ class ModelWorker:
                     'task; omissions or invented requirements fail review. ')
             config = self.delivery.item_config
             if config is not None:
-                if planning and not protocol_feedback:
+                if planning:
                     rules+=(' The existing ple-package-evidence checker has an item-by-item ZIP checkpoint. '
                             'It captures a complete provisional workbook and report, then record_item_zip '
                             'independently identifies the changed item from actual workbook rows in each '
@@ -499,18 +498,16 @@ async def solve(session):
                 continuing = bool(repair) or task_id in failed_work
                 if task_id in failed_work:
                     event('pr5_worker_resuming')
-                body=await worker.run(request['prompt'],planning=planning,owned=owned,continuing=continuing)
-                original=json.dumps(body,sort_keys=True)
-                body=canonicalize_paths(body,aliases,planning=planning)
                 if planning:
-                    bind_root_repairs(body, validation_tasks, event)
-                    body=await prepare_contract(body,worker=worker,tasks=validation_tasks,
+                    body=await prepare_contract(request['prompt'],worker=worker,tasks=validation_tasks,
                         source=task_source,checkers=cfg.external_checkers,aliases=aliases,
                         canonicalize=canonicalize_paths,event=event)
                 else:
-                    body=await delivery.capture_binary(body,owned)
-                if json.dumps(body,sort_keys=True)!=original:
-                    event('pr5_transport_paths_canonicalized',task_id=task_id)
+                    body=await worker.run(request['prompt'],owned=owned,continuing=continuing)
+                    original=json.dumps(body,sort_keys=True)
+                    body=await delivery.capture_binary(canonicalize_paths(body,aliases,planning=False),owned)
+                    if json.dumps(body,sort_keys=True)!=original:
+                        event('pr5_transport_paths_canonicalized',task_id=task_id)
                 if planning and body.get('unresolved')!=[]:
                     event('pr5_contract_blocked',
                           field_present='unresolved' in body,
