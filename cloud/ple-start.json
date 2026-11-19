@@ -1,6 +1,0 @@
-{
-  "task": "mv-conveyance-study",
-  "mode": "api-encrypted-upload",
-  "launch_attempt": 15,
-  "reason": "Rerun the electrical task with normalized read paths and one validated replan"
-}
