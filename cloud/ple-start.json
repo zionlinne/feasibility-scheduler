@@ -1,6 +1,0 @@
-{
-  "task": "mv-conveyance-study",
-  "mode": "api-encrypted-upload",
-  "launch_attempt": 16,
-  "reason": "Rerun the electrical task with JSON object mode for planning"
-}
