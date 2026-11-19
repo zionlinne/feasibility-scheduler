@@ -1,6 +1,0 @@
-{
-  "task": "mv-conveyance-study",
-  "mode": "api-encrypted-upload",
-  "launch_attempt": 21,
-  "reason": "Rerun the electrical PLE task with the JSON-mode request wording fixed"
-}

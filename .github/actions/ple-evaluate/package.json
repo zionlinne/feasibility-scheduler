@@ -1,8 +1,0 @@
-{
-  "name": "fbs-ple-evaluate-action",
-  "version": "1.0.0",
-  "private": true,
-  "dependencies": {
-    "@actions/artifact": "2.3.2"
-  }
-}
