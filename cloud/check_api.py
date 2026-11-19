@@ -1,4 +1,4 @@
-"""Two small model calls verify JSON object mode and tool transport before an engineering run.
+"""Two small model calls verify JSON and tool transport before an engineering run.
 
 Credentials come only from the environment; provider text is never logged.
 """

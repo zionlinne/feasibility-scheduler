@@ -288,8 +288,8 @@ class Delivery:
                 archive = next(r for r in evidence['files'] if r['path'] == self.item_config['archive'])
                 if baseline['zip_sha256'] != archive['sha256']:
                     raise ValueError('Delivery ZIP changed before the baseline was recorded')
-                self.item_baseline = self.item_latest = baseline
                 await self.save_item_version(baseline)
+                self.item_baseline = self.item_latest = baseline
             except ValueError as exc:
                 evidence['complete'] = False
                 evidence['item_baseline_error'] = str(exc)
@@ -315,7 +315,7 @@ class Delivery:
 
     async def save_item_version(self, observed):
         digest = observed['zip_sha256']
-        path = self.script + '-versions/' + digest + '.zip'
+        path = self.script + '-latest.zip'
         try:
             await self.run_audit({'source': self.item_config['archive'], 'target': path,
                                   'expected_digest': digest}, ' --copy-zip-version')
@@ -331,11 +331,10 @@ class Delivery:
             if digest != self.item_latest['zip_sha256']:
                 return
             try:
-                observed = await self.inspect_item_archive()
+                await self.inspect_item_archive()
+                return  # Keep readable work, even if it has not yet been registered.
             except ValueError:
-                observed = None
-            if observed is not None and observed['item_sha256'] == self.item_latest['item_sha256']:
-                return  # The current ZIP is readable and preserves every recorded item.
+                pass
             try:
                 await self.run_audit({'source': saved, 'target': self.item_config['archive'],
                                       'expected_digest': digest}, ' --copy-zip-version')

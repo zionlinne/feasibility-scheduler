@@ -89,9 +89,7 @@ def canonicalize_paths(body,aliases,*,planning):
     def paths(obj,key):
         if isinstance(obj.get(key),list):
             mapped = [aliases.get(x,x) if isinstance(x,str) else x for x in obj[key]]
-            if key == 'read_paths' and all(isinstance(path, str) for path in mapped):
-                mapped = list(dict.fromkeys(mapped))
-            obj[key] = mapped
+            obj[key] = list(dict.fromkeys(mapped)) if key == 'read_paths' and all(isinstance(x,str) for x in mapped) else mapped
     if planning:
         checks=body.get('checks')
         for check in checks if isinstance(checks,list) else []:
@@ -165,7 +163,9 @@ class ModelWorker:
             raise ValueError('Model stream ended before the completion finished')
         return response
 
-    async def run(self,prompt,*,planning=False,review=False,importing=False,owned=(),continuing=False):
+    async def run(self,prompt,*,planning=False,review=False,importing=False,protocol_feedback=False,owned=(),continuing=False):
+        from openai import APIError
+
         rules=(('You import task I/O for the PR5 adapter. ' if importing else
                 'You execute a request dispatched by the existing PR5 FBS harness. ')+
           'Follow its current contract, ownership, checks and output JSON schema. '
@@ -176,7 +176,12 @@ class ModelWorker:
           'The original task documents are available through the official task tools. '
           'Return exactly the requested JSON object, without Markdown. '
           'Do not ask the operator to do work or create a separate planning workflow. ')
-        if importing:
+        if protocol_feedback:
+            rules+=('Return only the requested JSON additions to missing contract fields. '
+                    'Do not regenerate the full contract, solve the engineering task, use tools, '
+                    'weaken existing obligations, or erase real blockers. Values must be grounded '
+                    'in the supplied task and the existing contract. ')
+        elif importing:
             rules+=('Import task I/O only; do not solve or design a workflow. Read the brief and '
                     'only the referenced material needed to identify actual requested outputs. '
                     'Return {"files":[{"path":"absolute task-container path","kind":"text|binary|final_message"}],'
@@ -197,8 +202,12 @@ class ModelWorker:
             rules+=('PR5 contract paths MUST use the exact canonical relative names in MODULES. '
                     'Absolute paths in TASK describe the remote environment, not contract paths. '
                     'Provided-material check paths use their exact registered provided/ names. '
-                    'Every check ID in checks must appear in the checks list of at least one '
-                    'acceptance_assignments entry. Verify that coverage before returning the plan. ')
+                    'Start with the fixed task requirements, registered checkers and deliverables. '
+                    'Plan by functional responsibility and actual dependencies. Split only where '
+                    'outputs and interfaces have distinct ownership. Keep whole-package checks at Root. '
+                    'Assign every check ID in acceptance_assignments. Verify the module schema before '
+                    'returning, including boundary, invariants and acceptance_limitations when local '
+                    'checks establish file existence or text presence only. ')
             rules+=('The host also registers ple-package-evidence: at acceptance it publishes current '
                     'FBS text outputs, packages declared archive members, independently checks member '
                     'names and SHA-256 against the current files at the exact requested destination, '
@@ -229,7 +238,9 @@ class ModelWorker:
                     'placeholders and inconsistent formulas. State genuine blockers explicitly. ')
             if continuing:
                 rules+=('Resume from the current artifacts in this same task container. Inspect existing '
-                        'assigned outputs and generation scripts first and preserve correct prior work. ')
+                        'assigned outputs and working files first. Continue unfinished work or the '
+                        'specific failed checks in this request. Preserve completed calculations, '
+                        'formulas and citations outside that repair. ')
         can_record_item = False
         if self.delivery is not None:
             rules+='\nHOST TASK DELIVERY MAP (read-only): '+json.dumps(self.delivery.spec)+'\n'
@@ -237,8 +248,9 @@ class ModelWorker:
                     'Its owned receipt artifact is a JSON text file: return its full JSON text in files '
                     'with at least {"path":"the declared remote path"}; the host captures actual size/hash '
                     'from disk before passing the receipt to PR5. A receipt is transport evidence only, '
-                    'not proof of format or engineering validity. Include any generation script text and '
-                    'reproduction command in the receipt when feasible. Never put binary bytes into a '
+                    'not proof of format or engineering validity. If useful, include a reproduction '
+                    'command referencing existing working files. Do not embed the workbook or its '
+                    'generation script in the receipt. Never put binary bytes into a '
                     'UTF-8 files value. For kind=text, deliver the actual complete text, and write an early '
                     'version to its declared remote output path as soon as it is complete. '
                     'Modify only remote outputs mapped from your current owned_files or repair_files; '
@@ -249,7 +261,7 @@ class ModelWorker:
                     'task; omissions or invented requirements fail review. ')
             config = self.delivery.item_config
             if config is not None:
-                if planning:
+                if planning and not protocol_feedback:
                     rules+=(' The existing ple-package-evidence checker has an item-by-item ZIP checkpoint. '
                             'It captures a complete provisional workbook and report, then record_item_zip '
                             'independently identifies the changed item from actual workbook rows in each '
@@ -261,9 +273,11 @@ class ModelWorker:
                     rules+=('\nITEM DELIVERY SPEC: '+json.dumps(config)+'\n'
                             'If the provisional ZIP is absent, write it first and confirm it is on disk. '
                             'Otherwise build on the current ZIP. ZIP records establish the delivery sequence. '
-                            'Finish the required design checks and itemized calculations before recording '
-                            'each item. Update its workbook rows (and report as needed), '
-                            'atomically rewrite the ZIP, then call record_item_zip for that item before '
+                            'Finish each item before recording it. Check the required design and alternatives, '
+                            'itemized quantities, costs, formulas and sources. Update that item in the '
+                            'workbook and report, retaining the completed work from other items. Then '
+                            'reopen the written ZIP at the declared location after you '
+                            'atomically replace it. Call record_item_zip for that item before '
                             'changing another item. The host compares actual workbook rows with the previous '
                             'recorded version. Use one item per ZIP update, including repairs. '
                             'A plain final ZIP or a final summary cannot establish this sequence. '
@@ -274,7 +288,7 @@ class ModelWorker:
         messages=[{'role':'system','content':rules},{'role':'user','content':prompt}]
         operations=0
         calls=0
-        correcting_reply = False
+        retried_request = correcting_reply = False
         phase_started=monotonic()
         phase = 'root' if review else 'import' if importing else 'plan' if planning else 'worker'
         while True:
@@ -290,9 +304,17 @@ class ModelWorker:
             event('pr5_model_call_started', phase=phase, calls=calls, tools=operations)
             try:
                 response=await asyncio.wait_for(self.complete(phase,started,**kwargs),timeout=left)
-            except Exception:
+            except Exception as exc:
                 event('pr5_model_call_failed', phase=phase, seconds=round(monotonic()-started, 1))
+                status = getattr(exc, 'status_code', None)
+                retryable = isinstance(exc, APIError) and (status is None or status in (408, 429)
+                                                          or isinstance(status, int) and status >= 500)
+                if phase == 'worker' and retryable and not retried_request:
+                    retried_request = True
+                    event('pr5_worker_request_retry', error_type=type(exc).__name__)
+                    continue
                 raise
+            retried_request = False
             u=response.usage
             cached=getattr(getattr(u,'prompt_tokens_details',None),'cached_tokens',0) or 0
             event('pr5_model_call_finished', phase=phase, seconds=round(monotonic()-started, 1),
@@ -305,11 +327,7 @@ class ModelWorker:
             if not message.tool_calls or correcting_reply:
                 try:
                     result=parse_object(message.content or '')
-                except (ValueError, IndexError) as exc:
-                    if planning:
-                        event('pr5_planning_json_invalid', error_type=type(exc).__name__,
-                              finish_reason=response.choices[0].finish_reason,
-                              response_chars=len(message.content or ''), offset=getattr(exc, 'pos', None))
+                except (ValueError, IndexError):
                     if phase != 'worker' or correcting_reply:
                         raise
                     correcting_reply = True
@@ -325,8 +343,9 @@ class ModelWorker:
                       calls=calls, tools=operations)
                 return result
             for call in message.tool_calls:
-                fn=call.function;args=json.loads(fn.arguments);operations+=1
+                fn=call.function;operations+=1
                 try:
+                    args=json.loads(fn.arguments)
                     if fn.name=='bash': result=await self.session.exec(args['command'],timeout_sec=args['timeout_sec'])
                     elif fn.name=='read_file':
                         data=await self.session.read_file(args['path'])
@@ -488,11 +507,8 @@ async def solve(session):
                 if row['event_id'] in seen_events:
                     continue
                 seen_events.add(row['event_id'])
-                fields = {}
-                if row['type'] == 'contract_repair_skipped':
-                    fields['reason'] = (row.get('details') or {}).get('reason')
                 event('pr5_scheduler_event',type=row['type'],task_id=row.get('task_id'),
-                      state=row.get('new_state'),sequence=row.get('sequence'),**fields)
+                      state=row.get('new_state'),sequence=row.get('sequence'))
 
         async def execute(request_path):
             request=json.loads(request_path.read_text(encoding='utf8'))
@@ -506,16 +522,17 @@ async def solve(session):
                 continuing = bool(repair) or task_id in failed_work
                 if task_id in failed_work:
                     event('pr5_worker_resuming')
+                body=await worker.run(request['prompt'],planning=planning,owned=owned,continuing=continuing)
+                original=json.dumps(body,sort_keys=True)
+                body=canonicalize_paths(body,aliases,planning=planning)
                 if planning:
-                    body=await prepare_contract(request['prompt'],worker=worker,tasks=validation_tasks,
+                    body=await prepare_contract(body,worker=worker,tasks=validation_tasks,
                         source=task_source,checkers=cfg.external_checkers,aliases=aliases,
                         canonicalize=canonicalize_paths,event=event)
                 else:
-                    body=await worker.run(request['prompt'],owned=owned,continuing=continuing)
-                    original=json.dumps(body,sort_keys=True)
-                    body=await delivery.capture_binary(canonicalize_paths(body,aliases,planning=False),owned)
-                    if json.dumps(body,sort_keys=True)!=original:
-                        event('pr5_transport_paths_canonicalized',task_id=task_id)
+                    body=await delivery.capture_binary(body,owned)
+                if json.dumps(body,sort_keys=True)!=original:
+                    event('pr5_transport_paths_canonicalized',task_id=task_id)
                 if planning and body.get('unresolved')!=[]:
                     event('pr5_contract_blocked',
                           field_present='unresolved' in body,

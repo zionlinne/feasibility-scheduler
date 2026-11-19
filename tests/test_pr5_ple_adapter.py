@@ -191,12 +191,15 @@ def test_item_zip_check_detects_skipped_intermediate_update(tmp_path):
         save_receipt()
         report, _ = await delivery.publish(workspace, check_items=True)
         assert report['detail'] == 'Unrecorded item changes in the final ZIP: C01'
+        newer = archive_path.read_bytes()
         await delivery.recover_item_archive()
-        restored = await delivery.inspect_item_archive()
-        assert restored == delivery.item_latest
+        assert archive_path.read_bytes() == newer
+        archive_path.unlink()
+        with pytest.raises(ValueError, match='Missing or unsafe delivery ZIP'):
+            await delivery.record_item_update('C01')
         archive_path.write_bytes(b'Unfinished ZIP')
         await delivery.recover_item_archive()
-        assert await delivery.inspect_item_archive() == restored
+        assert await delivery.inspect_item_archive() == delivery.item_latest
 
     asyncio.run(run())
 
@@ -317,94 +320,98 @@ def contract_fixture():
     return standardize(*fixture())
 
 
-def test_duplicate_read_paths_are_normalized_before_original_pr5_validation():
-    from dataclasses import replace
-    from ple_contract import planning_error, prepare_contract
-
-    tasks, plan = contract_fixture()
-    tasks = [replace(task, payload={**task.payload, 'external_checker_names': ['package']}) for task in tasks]
-    for check_id in ('delivery-package-validation', 'package-execution-evidence'):
-        plan['checks'].append({'id': check_id, 'kind': 'external', 'name': 'package',
-                               'read_paths': ['/task/output/a.py', 'a.py', 'c.py', 'a.py'],
-                               'repair_paths': ['a.py'], 'requirements': ['R1']})
-    aliases = {'/task/output/a.py': 'a.py'}
-    assert 'read_paths must be a unique relative path list' in planning_error(plan, tasks, 'Compare offers', {})
-
+def test_protocol_feedback_fills_missing_fields_then_passes_original_pr5_validation():
+    from ple_contract import preflight, prepare_contract
+    import copy
+    tasks, valid = contract_fixture()
+    original = copy.deepcopy(valid)
+    del original['composition']['method']
+    del original['composition']['counterexample_review']
+    original['modules'][0]['boundary'] = ''
+    observations = []
     class Worker:
         calls = 0
-
         async def run(self, prompt, **kwargs):
             self.calls += 1
-            return plan
-
+            assert all(field in prompt for field in ('composition.method', 'composition.counterexample_review', 'modules[0].boundary'))
+            return {'additions':[
+                {'path':['composition','method'],'value':valid['composition']['method']},
+                {'path':['composition','counterexample_review'],'value':valid['composition']['counterexample_review']},
+                {'path':['modules',0,'boundary'],'value':valid['modules'][0]['boundary']}]}
     worker = Worker()
-    result = asyncio.run(prepare_contract('Native planning prompt', worker=worker, tasks=tasks,
-        source='Compare offers', checkers={}, aliases=aliases, canonicalize=adapter.canonicalize_paths,
-        event=lambda *a, **k: None))
-    assert worker.calls == 1
-    assert planning_error(result, tasks, 'Compare offers', {}) is None
-    for original, check in zip(plan['checks'][-2:], result['checks'][-2:]):
-        assert check == {**original, 'read_paths': ['a.py', 'c.py']}
-    assert plan['checks'][-1]['read_paths'] == ['/task/output/a.py', 'a.py', 'c.py', 'a.py']
-
-    result['checks'][-1]['read_paths'] = ['../foreign.py', '../foreign.py']
-    rejected = adapter.canonicalize_paths(result, aliases, planning=True)
-    assert 'read_paths contains invalid paths' in planning_error(rejected, tasks, 'Compare offers', {})
-    result['checks'][-1].update(read_paths=['a.py'], repair_paths=['a.py', 'a.py'])
-    unchanged = adapter.canonicalize_paths(result, aliases, planning=True)
-    assert 'repair_paths must be a unique relative path list' in planning_error(unchanged, tasks, 'Compare offers', {})
-
-
-@pytest.mark.parametrize('replan_valid', [True, False])
-def test_bad_local_binding_gets_one_complete_replan_with_the_original_prompt(replan_valid):
-    import copy
-    from ple_contract import planning_error, prepare_contract
-
-    tasks, valid = contract_fixture()
-    invalid = copy.deepcopy(valid)
-    invalid['modules'][0]['local_checks'] = ['c.py']
-    replacement = valid if replan_valid else invalid
-    original_prompt = 'Native PR5 prompt with the original task and owned paths.'
-
-    class Worker:
-        calls = []
-
-        async def run(self, prompt, **kwargs):
-            self.calls.append((prompt, kwargs))
-            return invalid if len(self.calls) == 1 else replacement
-
-    worker = Worker()
-    result = asyncio.run(prepare_contract(original_prompt, worker=worker, tasks=tasks,
+    result = asyncio.run(prepare_contract(original, worker=worker, tasks=tasks,
         source='Compare offers', checkers={}, aliases={}, canonicalize=adapter.canonicalize_paths,
-        event=lambda *a, **k: None))
-    assert len(worker.calls) == 2
-    assert worker.calls[0] == (original_prompt, {'planning': True})
-    assert worker.calls[1][0].startswith(original_prompt)
-    assert 'check c.py is not executable within its local boundary' in worker.calls[1][0]
-    assert 'new complete plan' in worker.calls[1][0]
-    assert worker.calls[1][1] == {'planning': True}
-    assert result == replacement
-    assert (planning_error(result, tasks, 'Compare offers', {}) is None) is replan_valid
+        event=lambda kind, **fields: observations.append((kind, fields))))
+    assert worker.calls == 1 and preflight(result, tasks, 'Compare offers', {}) == []
+    assert 'method' not in original['composition']  # Host never filled a field itself.
+    assert result['checks'] == original['checks']
+    assert observations[0][1]['valid'] is False and observations[-1][1]['valid'] is True
 
 
-def test_real_blockers_are_preserved_without_replanning():
+def test_real_blockers_do_not_trigger_a_format_request_or_get_cleared():
     from ple_contract import prepare_contract
-
     tasks, plan = contract_fixture()
     plan['unresolved'] = ['mandatory input file is unavailable']
-
+    plan['composition'] = {}
     class Worker:
-        calls = 0
-
-        async def run(self, prompt, **kwargs):
-            self.calls += 1
-            return plan
-
-    worker = Worker()
-    result = asyncio.run(prepare_contract('Original plan prompt', worker=worker, tasks=tasks,
+        async def run(self, *args, **kwargs): pytest.fail('Must not ask a model to clear a real blocker')
+    result = asyncio.run(prepare_contract(plan, worker=Worker(), tasks=tasks,
         source='Compare offers', checkers={}, aliases={}, canonicalize=adapter.canonicalize_paths,
         event=lambda *a, **k: None))
-    assert worker.calls == 1 and result == plan
+    assert result is plan and result['unresolved'] == ['mandatory input file is unavailable']
+
+
+@pytest.mark.parametrize('change', ['predicate', 'remove-check', 'dependency'])
+def test_protocol_feedback_cannot_weaken_existing_obligations(change):
+    from ple_contract import prepare_contract
+    import copy
+    tasks, plan = contract_fixture()
+    del plan['composition']['verification']
+    changed = copy.deepcopy(plan)
+    changed['composition']['verification'] = 'Recheck outputs'
+    if change == 'predicate': changed['checks'][0]['path'] = 'c.py'
+    elif change == 'remove-check': changed['checks'].pop()
+    else: changed['modules'][0]['execution_dependencies'] = ['b']
+    changes={'predicate':(['checks',0,'path'],'c.py'),
+             'remove-check':(['checks'],changed['checks']),
+             'dependency':(['modules',0,'execution_dependencies'],['b'])}
+    path,value=changes[change]
+    class Worker:
+        async def run(self, *args, **kwargs): return {'additions':[{'path':path,'value':value}]}
+    result = asyncio.run(prepare_contract(plan, worker=Worker(), tasks=tasks,
+        source='Compare offers', checkers={}, aliases={}, canonicalize=adapter.canonicalize_paths,
+        event=lambda *a, **k: None))
+    assert result is plan and 'verification' not in result['composition']
+
+
+def test_malformed_field_types_reach_diagnostics_without_transport_rewriting_them():
+    from ple_contract import preflight
+    tasks, _ = contract_fixture()
+    malformed = {'version': 2, 'unresolved': [], 'checks': None, 'modules': 'wrong type'}
+    unchanged = adapter.canonicalize_paths(malformed, {}, planning=True)
+    errors = preflight(unchanged, tasks, 'Compare offers', {})
+    assert unchanged == malformed
+    assert any('checks:' in error for error in errors)
+    assert any('composition:' in error for error in errors)
+
+
+def test_format_correction_cannot_change_a_boolean_expected_value_to_a_number():
+    from ple_contract import preserve_obligations
+    before={'checks':[{'id':'exact','kind':'json_equals','value':True}]}
+    after={'checks':[{'id':'exact','kind':'json_equals','value':1}]}
+    with pytest.raises(ValueError,match='predicate'):
+        preserve_obligations(before,after)
+
+
+def test_missing_composition_and_conditional_module_limits_are_collected_together():
+    from ple_contract import missing_slots
+    tasks,plan=contract_fixture()
+    del plan['composition']['counterexample_review']
+    for module in plan['modules']:
+        del module['acceptance_limitations']
+    paths=missing_slots(plan,tasks)
+    assert ['composition','counterexample_review'] in paths
+    assert all(['modules',i,'acceptance_limitations'] in paths for i in range(len(plan['modules'])))
 
 
 def test_declared_output_list_imports_natural_language_xlsx_and_markdown():

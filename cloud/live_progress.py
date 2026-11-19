@@ -49,19 +49,6 @@ class Progress:
                 scope = 'Composition' if event.get('task_id') == '__contract_composition__' else 'Worker'
                 return f'{scope} repair {repair_round} dispatched'
             return 'Worker dispatched'
-        if kind == 'pr5_worker_resuming':
-            return 'Worker retry will continue from existing task files'
-        if kind == 'pr5_worker_reply_correction':
-            return 'Correcting the Worker response format in the current conversation'
-        if kind == 'pr5_item_version_restored':
-            return 'Restored the last recorded ZIP after a Worker error'
-        if kind == 'pr5_scheduler_event' and event.get('type') == 'contract_repair_skipped':
-            reasons = {'acceptance_unverified': 'acceptance could not be verified',
-                       'worker_response_failed': 'Worker response failed',
-                       'no_authorized_outputs': 'no authorized output files'}
-            reason = event.get('reason')
-            if isinstance(reason, str) and reason in reasons:
-                return 'Repair not dispatched: ' + reasons[reason]
         if kind == 'pr5_first_complete_delivery':
             return 'First complete package detected on disk'
         if kind == 'pr5_first_delivery_saved':
