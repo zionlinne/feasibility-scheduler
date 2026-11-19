@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import urllib.error
 
 import httpx2 as httpx
-from openai import AsyncOpenAI, OpenAI
+from openai import APIConnectionError, AsyncOpenAI, OpenAI
 import pytest
 
 PATH=Path(__file__).resolve().parents[1]/'cloud/check_api.py'
@@ -108,19 +108,27 @@ def test_streaming_probe_roundtrips_split_tool_arguments_and_usage():
     assert result['ok'] and result['calls'] == 2 and result['tokens'] == {'input': 20, 'output': 10}
 
 
-@pytest.mark.parametrize('truncated', [False, True])
-def test_async_worker_assembles_stream_before_accepting_tools(monkeypatch, capsys, truncated):
+@pytest.mark.parametrize('mode', ['complete', 'truncated', 'early_disconnect', 'late_disconnect'])
+def test_async_worker_assembles_stream_before_accepting_tools(monkeypatch, capsys, mode):
     monkeypatch.syspath_prepend(str(PATH.parents[1] / 'ple_entry'))
     monkeypatch.setenv('OPENAI_API_KEY', 'fixture')
     monkeypatch.setenv('MODEL_NAME', 'fixture-model')
     monkeypatch.setenv('FBS_PLE_MODEL_STREAM', '1')
-    from pr5_adapter import ModelWorker
+    from pr5_adapter import ModelStreamInterrupted, ModelWorker
+
+    partial = stream_reply([{'role': 'assistant', 'content': '{"private-output":'}], finish=None)
+
+    class Disconnect(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            if mode == 'late_disconnect':
+                yield partial.content
+            raise httpx.ReadError('fixture disconnected')
 
     def send(req):
         assert json.loads(req.content)['stream_options'] == {'include_usage': True}
-        if truncated:
-            return stream_reply([{'role': 'assistant', 'content': '{"private-output":'}], finish=None)
-        return tool_reply()
+        if mode.endswith('disconnect'):
+            return httpx.Response(200, headers={'content-type': 'text/event-stream'}, stream=Disconnect())
+        return partial if mode == 'truncated' else tool_reply()
 
     async def complete():
         worker = ModelWorker(SimpleNamespace(time_left=lambda: 60))
@@ -131,8 +139,11 @@ def test_async_worker_assembles_stream_before_accepting_tools(monkeypatch, capsy
             return await worker.complete('worker', monotonic(), model=worker.model,
                                          messages=[{'role': 'user', 'content': 'Call api_echo'}])
 
-    if truncated:
-        with pytest.raises(ValueError, match='ended before the completion finished'):
+    if mode == 'early_disconnect':
+        with pytest.raises(APIConnectionError):
+            asyncio.run(complete())
+    elif mode != 'complete':
+        with pytest.raises(ModelStreamInterrupted):
             asyncio.run(complete())
     else:
         result = asyncio.run(complete())
@@ -140,18 +151,22 @@ def test_async_worker_assembles_stream_before_accepting_tools(monkeypatch, capsy
         assert call.id == 'echo-1' and json.loads(call.function.arguments) == {'value': 'API_READY'}
         assert result.usage.prompt_tokens_details.cached_tokens == 8
     updates = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
-    assert len(updates) == 1 and updates[0]['event'] == 'pr5_model_stream_received'
-    assert updates[0].keys() == {'event', 'phase', 'seconds'}
+    if mode == 'early_disconnect':
+        assert not updates
+    else:
+        assert len(updates) == 1 and updates[0]['event'] == 'pr5_model_stream_received'
+        assert updates[0].keys() == {'event', 'phase', 'seconds'}
 
 
-def test_worker_retries_current_request_and_repairs_receipt_without_repeating_write(monkeypatch):
+@pytest.mark.parametrize('during_stream', [False, True])
+def test_worker_retries_current_request_and_repairs_receipt_without_repeating_write(monkeypatch, during_stream):
     from copy import deepcopy
     from openai import APIError
 
     monkeypatch.syspath_prepend(str(PATH.parents[1] / 'ple_entry'))
     monkeypatch.setenv('OPENAI_API_KEY', 'fixture')
     monkeypatch.setenv('MODEL_NAME', 'fixture-model')
-    from pr5_adapter import ModelWorker
+    from pr5_adapter import ModelStreamInterrupted, ModelWorker
 
     calls = []
     writes = []
@@ -174,7 +189,9 @@ def test_worker_retries_current_request_and_repairs_receipt_without_repeating_wr
                 function = SimpleNamespace(name='write_file', arguments='{"path":"out","content":"saved"}')
                 return response(tools=[SimpleNamespace(id='write-1', function=function)])
             if len(calls) == 2:
-                raise APIError('interrupted stream', request=httpx.Request('POST', 'https://fixture.invalid'), body=None)
+                if during_stream:
+                    raise ModelStreamInterrupted('fixture stream interrupted after data')
+                raise APIError('fixture request failed', request=httpx.Request('POST', 'https://fixture.invalid'), body=None)
             if len(calls) == 3:
                 return response('{"files":')
             return response('{"files":{"out":"saved"}}')
@@ -185,6 +202,12 @@ def test_worker_retries_current_request_and_repairs_receipt_without_repeating_wr
         finally:
             await worker.client.close()
 
+    if not during_stream:
+        with pytest.raises(APIError, match='fixture request failed'):
+            asyncio.run(run())
+        assert len(calls) == 2
+        assert writes == [('out', 'saved')]
+        return
     assert asyncio.run(run()) == {'files': {'out': 'saved'}}
     assert writes == [('out', 'saved')]
     assert len(calls) == 4 and calls[1] == calls[2]

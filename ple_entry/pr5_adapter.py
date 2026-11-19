@@ -137,6 +137,10 @@ def owns_item_archive(delivery, owned):
             and delivery.aliases[delivery.item_config['archive']] in owned)
 
 
+class ModelStreamInterrupted(ValueError):
+    """A model stream failed after the first response chunk."""
+
+
 class ModelWorker:
     def __init__(self,session,delivery=None):
         from openai import AsyncOpenAI
@@ -151,21 +155,31 @@ class ModelWorker:
         if not self.stream_model:
             return await completions.create(**kwargs)
 
+        from openai import APIError
+
+        received_chunk = False
         next_update = started
         async with completions.stream(**kwargs, stream_options={'include_usage': True}) as stream:
-            async for update in stream:
-                if update.type == 'chunk' and monotonic() >= next_update:
-                    now = monotonic()
-                    event('pr5_model_stream_received', phase=phase, seconds=round(now - started, 1))
-                    next_update = now + 30
-            response = await stream.get_final_completion()
+            try:
+                async for update in stream:
+                    if update.type != 'chunk':
+                        continue
+                    received_chunk = True
+                    if monotonic() >= next_update:
+                        now = monotonic()
+                        event('pr5_model_stream_received', phase=phase, seconds=round(now - started, 1))
+                        next_update = now + 30
+                response = await stream.get_final_completion()
+            except APIError as exc:
+                if received_chunk:
+                    raise ModelStreamInterrupted('Model stream interrupted before completion') from exc
+                raise
         if not response.choices or not response.choices[0].finish_reason:
-            raise ValueError('Model stream ended before the completion finished')
+            error = ModelStreamInterrupted if received_chunk else ValueError
+            raise error('Model stream ended before the completion finished')
         return response
 
     async def run(self,prompt,*,planning=False,review=False,importing=False,protocol_feedback=False,owned=(),continuing=False):
-        from openai import APIError
-
         rules=(('You import task I/O for the PR5 adapter. ' if importing else
                 'You execute a request dispatched by the existing PR5 FBS harness. ')+
           'Follow its current contract, ownership, checks and output JSON schema. '
@@ -306,10 +320,7 @@ class ModelWorker:
                 response=await asyncio.wait_for(self.complete(phase,started,**kwargs),timeout=left)
             except Exception as exc:
                 event('pr5_model_call_failed', phase=phase, seconds=round(monotonic()-started, 1))
-                status = getattr(exc, 'status_code', None)
-                retryable = isinstance(exc, APIError) and (status is None or status in (408, 429)
-                                                          or isinstance(status, int) and status >= 500)
-                if phase == 'worker' and retryable and not retried_request:
+                if phase == 'worker' and isinstance(exc, ModelStreamInterrupted) and not retried_request:
                     retried_request = True
                     event('pr5_worker_request_retry', error_type=type(exc).__name__)
                     continue
