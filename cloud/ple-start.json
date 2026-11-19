@@ -1,6 +1,6 @@
 {
-  "task": "mv-conveyance-study",
+  "task": "division-26-specifications",
   "mode": "api-encrypted-upload",
-  "launch_attempt": 21,
-  "reason": "Rerun the electrical PLE task with the JSON-mode request wording fixed"
+  "launch_attempt": 22,
+  "reason": "Run a different electrical task focused on construction specifications"
 }
