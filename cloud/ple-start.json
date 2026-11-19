@@ -1,6 +1,6 @@
 {
   "task": "mv-conveyance-study",
   "mode": "api-encrypted-upload",
-  "launch_attempt": 19,
-  "reason": "Rerun the electrical PLE task after reported provider capacity congestion"
+  "launch_attempt": 20,
+  "reason": "Retry the electrical PLE task after the prior preflight 503"
 }
