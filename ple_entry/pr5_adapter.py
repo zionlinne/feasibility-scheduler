@@ -196,7 +196,9 @@ class ModelWorker:
                     'when evidence is inadequate. It is not a professional certification or the official grader. ')
             rules+=('PR5 contract paths MUST use the exact canonical relative names in MODULES. '
                     'Absolute paths in TASK describe the remote environment, not contract paths. '
-                    'Provided-material check paths use their exact registered provided/ names. ')
+                    'Provided-material check paths use their exact registered provided/ names. '
+                    'Every check ID in checks must appear in the checks list of at least one '
+                    'acceptance_assignments entry. Verify that coverage before returning the plan. ')
             rules+=('The host also registers ple-package-evidence: at acceptance it publishes current '
                     'FBS text outputs, packages declared archive members, independently checks member '
                     'names and SHA-256 against the current files at the exact requested destination, '
@@ -280,6 +282,8 @@ class ModelWorker:
             if left is not None and left<=0: raise TimeoutError('Official task time exhausted')
             kwargs={'model':self.model,'messages':messages,'reasoning_effort':'high',
                     'max_completion_tokens':64000}
+            if planning:
+                kwargs['response_format'] = {'type': 'json_object'}
             if tools: kwargs.update(tools=tools,tool_choice='auto')
             started = monotonic()
             calls+=1
@@ -301,7 +305,11 @@ class ModelWorker:
             if not message.tool_calls or correcting_reply:
                 try:
                     result=parse_object(message.content or '')
-                except (ValueError, IndexError):
+                except (ValueError, IndexError) as exc:
+                    if planning:
+                        event('pr5_planning_json_invalid', error_type=type(exc).__name__,
+                              finish_reason=response.choices[0].finish_reason,
+                              response_chars=len(message.content or ''), offset=getattr(exc, 'pos', None))
                     if phase != 'worker' or correcting_reply:
                         raise
                     correcting_reply = True

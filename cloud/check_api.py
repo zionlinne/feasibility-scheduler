@@ -1,4 +1,4 @@
-"""Two small model calls verify JSON and tool transport before an engineering run.
+"""Two small model calls verify JSON object mode and tool transport before an engineering run.
 
 Credentials come only from the environment; provider text is never logged.
 """
@@ -57,7 +57,7 @@ def probe(sub, key, *, request=urllib.request.urlopen, stream_client=None):
     messages.append(first)
     messages.append({'role':'tool','tool_call_id':calls[0]['id'],
                      'content':json.dumps({'value':'API_READY'})})
-    last=ask()
+    last=ask(response_format={'type':'json_object'})
     if last.get('tool_calls') or json.loads(last.get('content') or '')!={'status':'API_READY'}:
         raise ValueError('API did not return the required final JSON')
     return {'ok':True,'model':model,'calls':2,'tokens':usage,'engineering_trial':False}

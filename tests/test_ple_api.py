@@ -32,6 +32,7 @@ def test_probe_sends_actual_model_and_roundtrips_tool_result():
             message={'role':'assistant','content':None,'tool_calls':[
                 {'id':'echo-1','type':'function','function':{'name':'api_echo','arguments':'{"value":"API_READY"}'}}]}
         else:
+            assert body['response_format'] == {'type': 'json_object'}
             assert body['messages'][-1]['tool_call_id']=='echo-1'
             assert json.loads(body['messages'][-1]['content'])=={'value':'API_READY'}
             message={'role':'assistant','content':'{"status":"API_READY"}'}
@@ -96,7 +97,9 @@ def test_streaming_probe_roundtrips_split_tool_arguments_and_usage():
         assert body['stream'] is True
         assert body['stream_options'] == {'include_usage': True}
         if body.get('tools'):
+            assert 'response_format' not in body
             return tool_reply()
+        assert body['response_format'] == {'type': 'json_object'}
         assert body['messages'][-1]['tool_call_id'] == 'echo-1'
         assert json.loads(body['messages'][-1]['content']) == {'value': 'API_READY'}
         return stream_reply([{'role': 'assistant', 'content': '{"status":'}, {'content': '"API_READY"}'}])
@@ -141,3 +144,66 @@ def test_async_worker_assembles_stream_before_accepting_tools(monkeypatch, capsy
     updates = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert len(updates) == 1 and updates[0]['event'] == 'pr5_model_stream_received'
     assert updates[0].keys() == {'event', 'phase', 'seconds'}
+
+
+@pytest.mark.parametrize('second_json_valid', [True, False])
+def test_planner_replan_consumes_raw_api_text(monkeypatch, capsys, second_json_valid):
+    from copy import deepcopy
+    from dataclasses import replace
+    from test_modular_planner import standardize
+    from test_contract_plan import fixture
+
+    monkeypatch.syspath_prepend(str(PATH.parents[1] / 'ple_entry'))
+    monkeypatch.setenv('OPENAI_API_KEY', 'fixture')
+    monkeypatch.setenv('MODEL_NAME', 'fixture-model')
+    monkeypatch.setenv('FBS_PLE_MODEL_STREAM', '1')
+    from ple_contract import prepare_contract
+    from pr5_adapter import ModelWorker, canonicalize_paths, event
+
+    tasks, valid = standardize(*fixture())
+    profile = {'id': 'fixture', 'categories': [
+        {'id': 'delivery', 'description': 'Delivery evidence', 'applicable': True,
+         'allowed_kinds': ['file_exists']}]}
+    tasks = [replace(task, payload={**task.payload, 'acceptance_profile': profile}) for task in tasks]
+    valid['checks'][0]['id'] = 'receipt-present'
+    valid['modules'][0]['local_checks'] = ['receipt-present', 'b.py']
+    valid['acceptance_assignments'] = [
+        {'id': 'own-a', 'category': 'delivery', 'scope': 'local', 'owners': ['a'],
+         'requirements': ['R1'], 'checks': ['receipt-present', 'b.py']},
+        {'id': 'own-b', 'category': 'delivery', 'scope': 'local', 'owners': ['b'],
+         'requirements': ['R1'], 'checks': ['c.py']},
+    ]
+    incomplete = deepcopy(valid)
+    incomplete['acceptance_assignments'][0]['checks'] = ['b.py']
+    raw_replies = iter([json.dumps(incomplete), json.dumps(valid) if second_json_valid else '{"private-output":'])
+    requests = []
+
+    def send(request):
+        requests.append(json.loads(request.content))
+        content = next(raw_replies)
+        return stream_reply([{'role': 'assistant', 'content': content[:13]}, {'content': content[13:]}])
+
+    async def usage(*args):
+        pass
+
+    async def run():
+        worker = ModelWorker(SimpleNamespace(time_left=lambda: 60, usage=usage))
+        await worker.client.close()
+        async with AsyncOpenAI(api_key='fixture', base_url=submission().model.endpoint,
+                               http_client=httpx.AsyncClient(transport=httpx.MockTransport(send))) as client:
+            worker.client = client
+            return await prepare_contract('Original planner request', worker=worker, tasks=tasks,
+                source='Compare offers', checkers={}, aliases={}, canonicalize=canonicalize_paths, event=event)
+
+    if second_json_valid:
+        assert asyncio.run(run()) == valid
+    else:
+        with pytest.raises(json.JSONDecodeError):
+            asyncio.run(run())
+    log = capsys.readouterr().out
+    assert 'unassigned acceptance checks' in log and 'private-output' not in log
+    assert ('pr5_planning_json_invalid' in log) is not second_json_valid
+    assert len(requests) == 2
+    assert all(req['response_format'] == {'type': 'json_object'} for req in requests)
+    assert 'Every check ID' in requests[0]['messages'][0]['content']
+    assert 'unassigned acceptance checks' in requests[1]['messages'][-1]['content']
