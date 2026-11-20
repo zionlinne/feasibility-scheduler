@@ -18,6 +18,9 @@ from ple_delivery import (Delivery, EvidenceSession, declared_item_updates, decl
 from ple_contract import prepare_contract
 
 
+ROOT_REVIEW_INSPECTION_TURNS = 16
+
+
 def event(kind, **values):
     print(json.dumps({'event':kind,**values}),flush=True)
 
@@ -304,12 +307,23 @@ class ModelWorker:
         calls=0
         request_retries = 0
         correcting_reply = False
+        review_turns = 0
+        closing_review = False
         phase_started=monotonic()
         phase = 'root' if review else 'import' if importing else 'plan' if planning else 'worker'
         stream_retry_limit = {'root': 5, 'worker': 1}.get(phase, 0)
         while True:
             left=self.session.time_left()
             if left is not None and left<=0: raise TimeoutError('Official task time exhausted')
+            if review and not closing_review and review_turns >= ROOT_REVIEW_INSPECTION_TURNS:
+                closing_review = True
+                tools = []
+                messages.append({'role':'user','content':
+                    'The inspection limit has been reached. Return the required JSON verdict now '
+                    'using only evidence already gathered. List confirmed failures with specific repairs. '
+                    'Mark uninspected requirements unverified. If there is a confirmed failure, '
+                    'return failed; otherwise return unverified unless all requirements were verified.'})
+                event('pr5_root_review_closeout', inspection_turns=review_turns)
             kwargs={'model':self.model,'messages':messages,'reasoning_effort':'high',
                     'max_completion_tokens':64000}
             if planning:
@@ -343,7 +357,7 @@ class ModelWorker:
                 await self.session.usage(self.model,u.prompt_tokens,u.completion_tokens,cached)
             message=response.choices[0].message
             messages.append(message.model_dump(exclude_none=True))
-            if not message.tool_calls or correcting_reply:
+            if not message.tool_calls or correcting_reply or closing_review:
                 try:
                     result=parse_object(message.content or '')
                 except (ValueError, IndexError):
@@ -361,6 +375,8 @@ class ModelWorker:
                 event('pr5_model_phase_finished', phase=phase, seconds=round(monotonic()-phase_started, 1),
                       calls=calls, tools=operations)
                 return result
+            if review:
+                review_turns += 1
             for call in message.tool_calls:
                 fn=call.function;operations+=1
                 try:
@@ -466,8 +482,11 @@ async def solve(session):
             prompt=(task_source+'\n\nHOST DELIVERY MAP:\n'+json.dumps(spec)
               +'\nACTUAL EXECUTION/PACKAGING EVIDENCE:\n'+json.dumps(evidence)
               +'\nACTUAL FBS TEXT ARTIFACTS:\n'+json.dumps({n:(workspace/n).read_text(encoding='utf8') for n in names})
-              +'\nInspect all delivered files and verify the task requirements, calculations, constraints, '
-               'resource/day consistency and citations from supplied source documents. '
+              +f'\nYou have up to {ROOT_REVIEW_INSPECTION_TURNS} inspection turns with tools. '
+               'Start with hard requirements and checks that could affect acceptance. '
+               'On a later review prioritize the repairs and any requirements affected by those changes. '
+               'Verify calculations, constraints, consistency and citations from supplied source documents. '
+               'Return the verdict as soon as the evidence supports it. Mark unchecked items unverified. '
                'Return {"status":"passed|failed|unverified","detail":"specific evidence and defects",'
                '"criteria":[{"requirement":"...","status":"passed|failed|unverified","evidence":"..."}]}. '
                'Missing calculations, inputs, or citations that the worker must supply are failures. '

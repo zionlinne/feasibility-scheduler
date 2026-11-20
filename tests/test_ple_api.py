@@ -269,3 +269,47 @@ def test_root_retries_interrupted_request_five_times(monkeypatch, eventually_suc
     assert len(requests) == 7
     assert all(request == requests[1] for request in requests[1:])
     assert requests[1]['messages'][-1]['role'] == 'tool'
+
+
+
+@pytest.mark.parametrize('returns_verdict', [True, False])
+def test_root_closes_at_inspection_limit(monkeypatch, returns_verdict):
+    monkeypatch.syspath_prepend(str(PATH.parents[1] / 'ple_entry'))
+    import pr5_adapter as adapter
+
+    monkeypatch.setattr(adapter, 'ROOT_REVIEW_INSPECTION_TURNS', 2)
+    reads, requests = [], []
+
+    async def read_file(path):
+        reads.append(path)
+        return b'evidence'
+
+    verdict = '{"status":"unverified","criteria":[{"requirement":"load","status":"unverified"}]}'
+    inspect = SimpleNamespace(name='read_file', arguments='{"path":"out"}')
+
+    async def complete(phase, started, **kwargs):
+        assert phase == 'root'
+        requests.append(kwargs)
+        content = None
+        tools = [SimpleNamespace(id=f'read-{len(requests)}', function=inspect)]
+        if 'tools' not in kwargs:
+            assert 'already gathered' in kwargs['messages'][-1]['content']
+            assert kwargs['messages'][-2]['role'] == 'tool'
+            if returns_verdict:
+                content, tools = verdict, []
+        message = SimpleNamespace(content=content, tool_calls=tools,
+                                  model_dump=lambda **unused: {'role': 'assistant', 'content': content})
+        return SimpleNamespace(usage=None, choices=[SimpleNamespace(message=message)])
+
+    worker = adapter.ModelWorker.__new__(adapter.ModelWorker)
+    worker.session = SimpleNamespace(time_left=lambda: 60, read_file=read_file)
+    worker.delivery = None
+    worker.model = 'fixture-model'
+    worker.complete = complete
+    if returns_verdict:
+        assert asyncio.run(worker.run('Check the output.', review=True)) == json.loads(verdict)
+    else:
+        with pytest.raises(ValueError):
+            asyncio.run(worker.run('Check the output.', review=True))
+    assert len(requests) == 3
+    assert reads == ['out', 'out']
