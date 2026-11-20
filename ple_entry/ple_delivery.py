@@ -69,6 +69,21 @@ def declared_item_updates(instruction, spec):
             'reports': [report[1] + extension for extension in ('.md', '.pdf', '.docx')]}
 
 
+def declared_guide_revision(instruction, spec):
+    """Recognize the brief's explicit guide-derived DOCX package requirement."""
+    if not re.search(r'\bedit (?:the |each )?guide specifications?\b', instruction, re.I):
+        return None
+    directory = re.search(r'`([\w/-]+/)`:\s*\*{0,2}one\s+`\.docx`\s+per\b', instruction, re.I)
+    if not directory or directory[1].startswith('/'):
+        return None
+    paths = [f['path'] for f in spec['files'] if f['kind'] == 'binary']
+    paths += [a['path'] for a in spec['archives']]
+    archives = [path for path in paths if PurePosixPath(path).suffix.lower() == '.zip']
+    if len(archives) != 1:
+        return None
+    return {'archive': archives[0], 'directory': directory[1], 'masters': {}}
+
+
 def normalize_spec(value, root):
     if not isinstance(value, dict) or not isinstance(value.get('files'), list):
         raise ValueError('Task importer must declare files')
@@ -245,7 +260,7 @@ class EvidenceSession:
 
 
 class Delivery:
-    def __init__(self, session, spec, required_reads, event, item_config=None):
+    def __init__(self, session, spec, required_reads, event, item_config=None, *, guide_config=None):
         self.session, self.spec, self.required_reads, self.event = session, spec, required_reads, event
         self.lock = asyncio.Lock()
         self.script = '/tmp/fbs-delivery-' + uuid.uuid4().hex + '.py'
@@ -261,6 +276,8 @@ class Delivery:
         self.item_latest = None
         self.item_updates = []
         self.item_snapshot = None
+        self.guide_config = guide_config
+        self.guide_comparison = None
 
     @property
     def names(self):
@@ -280,7 +297,24 @@ class Delivery:
             raise ValueError('Task-container delivery inspection failed: ' + str(result.get('output', ''))[-1200:])
         return json.loads(result['output'])
 
-    async def inspect(self, *, package=False):
+    async def check_guide_revision(self, evidence, *, refresh):
+        archive = self.guide_config['archive']
+        record = next((r for r in evidence['files'] + evidence['archives'] if r['path'] == archive), {})
+        sha = record.get('sha256')
+        if not sha or record['status'] == 'failed':
+            return {'status': 'unverified', 'detail': 'Guide revision ZIP is missing or malformed'}
+        if not refresh and self.guide_comparison and self.guide_comparison[0] == sha:
+            return self.guide_comparison[1]
+        try:
+            result = await self.run_audit({**self.guide_config, 'sha256': sha}, ' --guide-revision')
+        except ValueError:
+            result = {'status': 'unverified', 'detail': 'Task-container guide comparison could not run'}
+        if self.guide_comparison != (sha, result):
+            self.event('pr5_guide_revision_checked', sha256=sha, **result)
+        self.guide_comparison = (sha, result)
+        return result
+
+    async def inspect(self, *, package=False, verify_guide=False):
         evidence = await self.run_audit(self.spec, ' --package' if package else '')
         if self.item_config is not None and self.item_baseline is None and evidence['complete']:
             try:
@@ -293,6 +327,8 @@ class Delivery:
             except ValueError as exc:
                 evidence['complete'] = False
                 evidence['item_baseline_error'] = str(exc)
+        if self.guide_config is not None and (evidence['complete'] or verify_guide):
+            evidence['guide_revision'] = await self.check_guide_revision(evidence, refresh=verify_guide)
         evidence['explicit_input_reads'] = list(self.session.reads)
         observed = [r['path'] for r in self.session.reads]
         # This describes host preloading, not a claim to observe every shell/MCP read.
@@ -522,7 +558,7 @@ class Delivery:
             for item in self.spec['files']:
                 if item['kind'] == 'text':
                     await self.session.write_file(item['path'], (workspace/item['artifact']).read_bytes())
-            evidence = await self.inspect(package=True)
+            evidence = await self.inspect(package=True, verify_guide=check_items)
             records = {r['path']: r for r in evidence['files']}
             failures = []
             for item in self.spec['files']:
@@ -542,6 +578,10 @@ class Delivery:
                 error = await self.check_item_updates(evidence)
                 if error:
                     failures.append(error)
+            if check_items and not failures and 'guide_revision' in evidence:
+                guide = evidence['guide_revision']
+                if guide['status'] != 'passed':
+                    return {'status': guide['status'], 'detail': guide['detail']}, evidence
             status = 'failed' if failures else 'passed'
             # Format unknowns are explicit and passed to Root for actual parser verification.
             return {'status': status, 'detail': '; '.join(failures) if failures else json.dumps(evidence)}, evidence

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 import zipfile
 
 import pytest
@@ -14,8 +15,9 @@ ENTRY=Path(__file__).resolve().parents[1]/'ple_entry'
 sys.path.insert(0,str(ENTRY))
 spec=importlib.util.spec_from_file_location('pr5_ple_adapter',ENTRY/'pr5_adapter.py')
 adapter=importlib.util.module_from_spec(spec);spec.loader.exec_module(adapter)
-from ple_delivery import Delivery, EvidenceSession, declared_item_updates, declared_package, normalize_spec, first_reads
-from container_audit import run as audit_delivery, payload_check
+from ple_delivery import (Delivery, EvidenceSession, declared_guide_revision, declared_item_updates,
+                          declared_package, normalize_spec, first_reads)
+from container_audit import WORD_XML, run as audit_delivery, payload_check
 
 
 def test_declared_output_table_is_imported_without_task_name_branch():
@@ -119,6 +121,73 @@ def test_task_import_accepts_binary_and_final_message_without_requiring_a_zip():
         normalize_spec({'files': [{'path': '../input.csv', 'kind': 'text'}]}, '/app/files')
     with pytest.raises(ValueError):
         normalize_spec({'files': [{'path': '/app/files/tests/key.json', 'kind': 'text'}]}, '/app/files')
+
+
+def test_guide_check_compares_each_zip_version_and_keeps_the_delivery(tmp_path):
+    source = tmp_path/'26 00 01.SEC'
+    original = [f'sourceword{i}' for i in range(200)]
+    source.write_text('<SPEC>' + ' '.join(original) + '</SPEC>')
+    archive = tmp_path/'submission.zip'
+    spec = normalize_spec({'files': [{'kind': 'binary', 'path': str(archive)}]}, str(tmp_path))
+    brief = '`specs/`: **one `.docx` per section**. Edit the guide specification for each section.'
+    config = declared_guide_revision(brief, spec)
+    assert config['directory'] == 'specs/' and config['archive'] == str(archive)
+    assert declared_guide_revision('Write a new specification from scratch.', spec) is None
+    workspace = tmp_path/'workspace'
+    workspace.mkdir()
+    events = []
+
+    def write_zip(words):
+        doc = ET.Element(WORD_XML+'document')
+        body = ET.SubElement(doc, WORD_XML+'body')
+        for text in ('SECTION 26 00 01', ' '.join(words)):
+            para = ET.SubElement(body, WORD_XML+'p')
+            ET.SubElement(ET.SubElement(para, WORD_XML+'r'), WORD_XML+'t').text = text
+        binary = io.BytesIO()
+        with zipfile.ZipFile(binary, 'w') as member:
+            member.writestr('word/document.xml', ET.tostring(doc))
+        with zipfile.ZipFile(archive, 'w') as package:
+            package.writestr('specs/section.docx', binary.getvalue())
+            package.writestr('support/notes.docx', binary.getvalue())
+        content = archive.read_bytes()
+        receipt.write_text(json.dumps({'path': str(archive), 'size': len(content),
+                                       'sha256': hashlib.sha256(content).hexdigest()}))
+        return content
+
+    session = EvidenceSession(LocalTaskSession())
+    delivery = Delivery(session, spec, [], lambda name, **fields: events.append((name, fields)), guide_config=config)
+    delivery.snapshot = None
+    receipt = workspace/delivery.names[0]
+    receipt.parent.mkdir(parents=True)
+
+    async def run():
+        config['masters'] = await delivery.run_audit(str(tmp_path), ' --guide-masters')
+        write_zip(original[:50] + ['tailored'] + original[51:])
+        assert (await delivery.checkpoint())['guide_revision']['status'] == 'passed'
+        assert (await delivery.checkpoint())['guide_revision']['status'] == 'passed'
+        assert (await delivery.publish(workspace, check_items=True))[0]['status'] == 'passed'
+
+        write_zip(original[:25])
+        checked, evidence = await delivery.publish(workspace, check_items=True)
+        assert checked['status'] == 'failed'
+        assert evidence['guide_revision']['sections']['26 00 01']['length_ratio'] < .2
+
+        revised = write_zip([f'rewritten{i}' for i in range(200)])
+        checked, evidence = await delivery.publish(workspace, check_items=True)
+        assert checked['status'] == 'failed' and '26 00 01' in checked['detail']
+        assert evidence['complete']
+        assert (await delivery.publish(workspace))[0]['status'] == 'passed'
+        assert archive.read_bytes() == revised
+
+        write_zip(original)
+        assert (await delivery.checkpoint())['guide_revision']['status'] == 'passed'
+        source.write_text('changed guide')
+        checked, _ = await delivery.publish(workspace, check_items=True)
+        assert checked['status'] == 'unverified' and 'changed since planning' in checked['detail']
+        assert [e['status'] for name, e in events if name == 'pr5_guide_revision_checked'] == [
+            'passed', 'failed', 'failed', 'passed', 'unverified']
+
+    asyncio.run(run())
 
 
 def test_item_zip_check_detects_skipped_intermediate_update(tmp_path):

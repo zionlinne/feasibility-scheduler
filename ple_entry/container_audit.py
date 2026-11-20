@@ -4,10 +4,12 @@ from __future__ import annotations
 import csv
 from collections import Counter
 import hashlib
+from html import unescape
 import io
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import shutil
 import sys
 import tempfile
@@ -16,6 +18,12 @@ import zipfile
 
 
 MAX_PARSE_BYTES = 32 * 1024 * 1024
+# A gross-rewrite safeguard, independent of engineering acceptance.
+GUIDE_PHRASE_WORDS = 12
+GUIDE_MIN_LENGTH_RATIO = 0.20
+GUIDE_MIN_MATCH_RATIO = 0.10
+GUIDE_SECTION = r'\d{2}\s+\d{2}\s+\d{2}(?:\.\d{2}(?:\s+\d{2})?)?'
+WORD_XML = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
 
 
 def digest(path):
@@ -216,6 +224,97 @@ def item_archive(config):
             'item_sha256': {item: value.hexdigest() for item, value in hashes.items()}}
 
 
+def guide_masters(project_root):
+    """Bind section numbers to the supplied SpecsIntact sources before drafting."""
+    root = Path(project_root)
+    masters = {}
+    for path in sorted(root.rglob('*.SEC')):
+        section = re.fullmatch(GUIDE_SECTION, path.stem)
+        if section is None or not safe_file(path) or path.stat().st_size > MAX_PARSE_BYTES:
+            continue
+        if set(path.relative_to(root).parts) & {'output', 'tests', 'solutions', 'verifier', '.git'}:
+            continue
+        number = ' '.join(section[0].split())
+        masters.setdefault(number, []).append({'path': str(path), 'sha256': digest(path)})
+    return masters
+
+
+def guide_text_words(text):
+    return re.findall(r'[a-z0-9]+', text.casefold())
+
+
+def guide_phrases(words):
+    return set(zip(*(words[offset:] for offset in range(GUIDE_PHRASE_WORDS))))
+
+
+def inspect_guide_revision(config):
+    """Compare actual DOCX body text with the corresponding bound guide."""
+    archive_path = Path(config['archive'])
+    if not safe_file(archive_path) or archive_path.stat().st_size > MAX_PARSE_BYTES:
+        return {'status': 'unverified', 'detail': 'Cannot read the submitted guide revision ZIP'}
+    raw = archive_path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != config['sha256']:
+        return {'status': 'unverified', 'detail': 'ZIP changed before guide comparison'}
+    sections, failed, unverified = {}, [], []
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        for member in archive.infolist():
+            if (member.is_dir() or not member.filename.startswith(config['directory'])
+                    or not member.filename.lower().endswith('.docx')):
+                continue
+            if member.file_size > MAX_PARSE_BYTES:
+                unverified.append(f'{member.filename}: DOCX exceeds the existing audit size limit')
+                continue
+            with zipfile.ZipFile(io.BytesIO(archive.read(member))) as doc:
+                if doc.getinfo('word/document.xml').file_size > MAX_PARSE_BYTES:
+                    unverified.append(f'{member.filename}: DOCX body exceeds the existing audit size limit')
+                    continue
+                body = ET.fromstring(doc.read('word/document.xml'))
+            paragraphs = [''.join(t.text or '' for t in p.iter(WORD_XML+'t')).strip()
+                          for p in body.iter(WORD_XML+'p')]
+            heading = next((p for p in paragraphs if p), '')
+            number = re.fullmatch(r'SECTION\s+(' + GUIDE_SECTION + ')', heading, re.I)
+            if not number:
+                failed.append(f'{member.filename}: missing literal SECTION number as first paragraph')
+                continue
+            section = ' '.join(number[1].split())
+            if section in sections:
+                failed.append(f'{section}: supplied more than one DOCX revision')
+                continue
+            sections[section] = {'member': member.filename}
+            sources = config['masters'].get(section, [])
+            if len(sources) != 1 or not safe_file(sources[0]['path']):
+                unverified.append(f'{section}: cannot identify one supplied guide to compare')
+                continue
+            source = Path(sources[0]['path'])
+            if source.stat().st_size > MAX_PARSE_BYTES:
+                unverified.append(f'{section}: guide exceeds the existing audit size limit')
+                continue
+            source_raw = source.read_bytes()
+            if hashlib.sha256(source_raw).hexdigest() != sources[0]['sha256']:
+                unverified.append(f'{section}: supplied guide changed since planning')
+                continue
+            source_body = unescape(re.sub(r'<[^>]+>', ' ', source_raw.decode('cp1252', errors='replace')))
+            source_words = guide_text_words(source_body)
+            if len(source_words) < GUIDE_PHRASE_WORDS:
+                unverified.append(f'{section}: could not extract text from the supplied guide')
+                continue
+            revised_words = guide_text_words(' '.join(paragraphs))
+            phrases = guide_phrases(revised_words)
+            length = len(revised_words) / len(source_words)
+            match = len(phrases & guide_phrases(source_words)) / max(1, len(phrases))
+            sections[section].update(source=source.name, length_ratio=round(length, 4),
+                                     retained_phrase_ratio=round(match, 4))
+            if length < GUIDE_MIN_LENGTH_RATIO or match < GUIDE_MIN_MATCH_RATIO:
+                failed.append(f'{section}: use {source.name} as the working document and restore '
+                              f'applicable guide clauses (length {length:.1%} of guide, '
+                              f'{match:.1%} of delivery phrases found in guide)')
+    if not sections and not failed and not unverified:
+        failed.append('ZIP contains no DOCX guide revisions')
+    status = 'failed' if failed else 'unverified' if unverified else 'passed'
+    return {'status': status, 'sections': sections,
+            'detail': '; '.join(failed + unverified) or 'Source retention checks passed'}
+
+
 def run(spec, *, package=False):
     files = {f['path']: inspect_file(f['path']) for f in spec['files'] if f['kind'] != 'final_message'}
     archives = []
@@ -272,5 +371,12 @@ if __name__ == '__main__':
             print(json.dumps(item_archive(value)))
         except (ValueError, KeyError, OSError, zipfile.BadZipFile) as exc:
             print(json.dumps({'error': str(exc)}))
+    elif '--guide-masters' in sys.argv[2:]:
+        print(json.dumps(guide_masters(value)))
+    elif '--guide-revision' in sys.argv[2:]:
+        try:
+            print(json.dumps(inspect_guide_revision(value)))
+        except (OSError, KeyError, ValueError, RuntimeError, zipfile.BadZipFile, ET.ParseError) as exc:
+            print(json.dumps({'status': 'unverified', 'detail': f'Guide comparison failed: {type(exc).__name__}'}))
     else:
         print(json.dumps(run(value, package='--package' in sys.argv[2:])))

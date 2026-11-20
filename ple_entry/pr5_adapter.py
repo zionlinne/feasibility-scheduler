@@ -13,8 +13,8 @@ from time import monotonic
 
 from feasibility_scheduler.adapters.legacy_doc import LegacyDocConfig, run_legacy_doc, build_legacy_tasks
 from mcp_tools import TaskMcpTools, TOOLS as MCP_TOOLS
-from ple_delivery import (Delivery, EvidenceSession, declared_item_updates, declared_package, first_reads,
-                          normalize_spec, task_root)
+from ple_delivery import (Delivery, EvidenceSession, declared_guide_revision, declared_item_updates,
+                          declared_package, first_reads, normalize_spec, task_root)
 from ple_contract import prepare_contract
 
 
@@ -273,6 +273,15 @@ class ModelWorker:
                     'Engineering review must independently verify every required deliverable, all '
                     'unknown format checks, and the completeness of this I/O map against the original '
                     'task; omissions or invented requirements fail review. ')
+            guide = self.delivery.guide_config
+            if guide is not None and planning and not protocol_feedback:
+                rules+=('The existing ple-package-evidence checker also compares the delivered DOCX '
+                        'sections with the supplied guide sources for substantial loss of guide text. '
+                        'Use it for the guide revision obligation and leave engineering verification to Root. ')
+            if guide is not None and not (planning or review or importing):
+                rules+=('Build each specification section by editing the supplied guide with the same section '
+                        'number and retaining its applicable clauses. Inspect the saved guide comparison '
+                        'after writing the ZIP and fix any flagged sections in the existing draft. ')
             config = self.delivery.item_config
             if config is not None:
                 if planning and not protocol_feedback:
@@ -302,6 +311,7 @@ class ModelWorker:
         messages=[{'role':'system','content':rules},{'role':'user','content':prompt}]
         operations=0
         calls=0
+        last_guide_comparison = None
         request_retries = 0
         correcting_reply = False
         phase_started=monotonic()
@@ -388,6 +398,11 @@ class ModelWorker:
                         result={'tool_result':result,'complete_delivery_on_disk':evidence['complete']}
                         if 'item_baseline_error' in evidence:
                             result['item_baseline_error'] = evidence['item_baseline_error']
+                        comparison = self.delivery.guide_comparison
+                        if comparison and comparison != last_guide_comparison and 'guide_revision' in evidence:
+                            guide = evidence['guide_revision']
+                            result['guide_revision'] = {key: guide[key] for key in ('status', 'detail')}
+                            last_guide_comparison = comparison
                     except Exception as exc:
                         result={'tool_result':result,'delivery_checkpoint_error':type(exc).__name__}
                 text=json.dumps(result,ensure_ascii=False)
@@ -435,8 +450,15 @@ async def solve(session):
         import_prompt='Task root: '+root+'\n'+session.instruction+'\n'+task_source
         spec=await import_task_spec(worker,import_prompt,root,event)
         event('pr5_task_io_import_finished',files=len(spec['files']),archives=len(spec['archives']))
-    item_config = declared_item_updates(session.instruction+'\n'+task_source,spec)
-    delivery=Delivery(session,spec,required_reads,event,item_config=item_config)
+    brief = session.instruction+'\n'+task_source
+    item_config = declared_item_updates(brief,spec)
+    guide_config = declared_guide_revision(brief,spec)
+    delivery=Delivery(session,spec,required_reads,event,item_config=item_config,guide_config=guide_config)
+    if guide_config is not None and root != '/':
+        try:
+            guide_config['masters'] = await delivery.run_audit(root, ' --guide-masters')
+        except ValueError:
+            event('pr5_guide_sources_unavailable')
     names=delivery.names
     aliases=delivery.aliases
     aliases.update({str(PurePosixPath(root)/name.removeprefix('provided/')):name for name in references})
