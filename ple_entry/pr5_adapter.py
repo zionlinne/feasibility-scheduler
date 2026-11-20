@@ -302,9 +302,11 @@ class ModelWorker:
         messages=[{'role':'system','content':rules},{'role':'user','content':prompt}]
         operations=0
         calls=0
-        retried_request = correcting_reply = False
+        request_retries = 0
+        correcting_reply = False
         phase_started=monotonic()
         phase = 'root' if review else 'import' if importing else 'plan' if planning else 'worker'
+        stream_retry_limit = {'root': 5, 'worker': 1}.get(phase, 0)
         while True:
             left=self.session.time_left()
             if left is not None and left<=0: raise TimeoutError('Official task time exhausted')
@@ -319,13 +321,19 @@ class ModelWorker:
             try:
                 response=await asyncio.wait_for(self.complete(phase,started,**kwargs),timeout=left)
             except Exception as exc:
-                event('pr5_model_call_failed', phase=phase, seconds=round(monotonic()-started, 1))
-                if phase == 'worker' and isinstance(exc, ModelStreamInterrupted) and not retried_request:
-                    retried_request = True
-                    event('pr5_worker_request_retry', error_type=type(exc).__name__)
+                will_retry = (
+                    isinstance(exc, ModelStreamInterrupted) and request_retries < stream_retry_limit
+                )
+                event('pr5_model_call_failed', phase=phase, seconds=round(monotonic()-started, 1),
+                      error_type=type(exc).__name__, retry=request_retries+1 if will_retry else 0,
+                      retry_limit=stream_retry_limit)
+                if will_retry:
+                    request_retries += 1
+                    if phase == 'worker':
+                        event('pr5_worker_request_retry', error_type=type(exc).__name__)
                     continue
                 raise
-            retried_request = False
+            request_retries = 0
             u=response.usage
             cached=getattr(getattr(u,'prompt_tokens_details',None),'cached_tokens',0) or 0
             event('pr5_model_call_finished', phase=phase, seconds=round(monotonic()-started, 1),

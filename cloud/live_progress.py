@@ -90,7 +90,14 @@ class Progress:
         if kind == 'pr5_model_stream_received':
             return f'{phase} API stream receiving data at {seconds:.1f}s'
         if kind == 'pr5_model_call_failed':
-            return f'{phase} API call failed after {seconds:.1f}s'
+            detail = f'{phase} API call failed after {seconds:.1f}s'
+            error_type = event.get('error_type')
+            if isinstance(error_type, str) and error_type.isidentifier():
+                detail += f' ({error_type})'
+            retry = count(event.get('retry'))
+            if retry:
+                detail += f' | retry {retry}/{count(event.get("retry_limit"))}'
+            return detail
         if kind == 'pr5_model_phase_finished':
             return (f'{phase} finished in {seconds:.1f}s | {count(event.get("calls"))} API calls, '
                     f'{count(event.get("tools"))} tool calls')

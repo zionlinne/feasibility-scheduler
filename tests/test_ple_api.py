@@ -216,3 +216,56 @@ def test_worker_retries_current_request_and_repairs_receipt_without_repeating_wr
     assert calls[1]['messages'][-1]['role'] == 'tool'
     assert 'tools' not in calls[3]
     assert 'Preserve completed calculations' in calls[0]['messages'][0]['content']
+
+
+
+@pytest.mark.parametrize('eventually_succeeds', [False, True])
+def test_root_retries_interrupted_request_five_times(monkeypatch, eventually_succeeds):
+    from copy import deepcopy
+
+    monkeypatch.syspath_prepend(str(PATH.parents[1] / 'ple_entry'))
+    monkeypatch.setenv('OPENAI_API_KEY', 'fixture')
+    monkeypatch.setenv('MODEL_NAME', 'fixture-model')
+    from pr5_adapter import ModelStreamInterrupted, ModelWorker
+
+    reads = []
+    requests = []
+
+    def reply(content, tools=()):
+        message = SimpleNamespace(
+            content=content, tool_calls=tools,
+            model_dump=lambda **kwargs: {'role': 'assistant', 'content': content},
+        )
+        return SimpleNamespace(usage=None, choices=[SimpleNamespace(message=message)])
+
+    async def read_file(path):
+        reads.append(path)
+        return b'original artifact'
+
+    async def complete(phase, started, **kwargs):
+        assert phase == 'root'
+        requests.append(deepcopy(kwargs))
+        if len(requests) == 1:
+            inspect = SimpleNamespace(name='read_file', arguments='{"path":"out"}')
+            return reply(None, [SimpleNamespace(id='read-1', function=inspect)])
+        if len(requests) <= 6 or not eventually_succeeds:
+            raise ModelStreamInterrupted('fixture stream interrupted after data')
+        return reply('{"status":"passed"}')
+
+    async def run():
+        worker = ModelWorker(SimpleNamespace(time_left=lambda: 60, read_file=read_file))
+        worker.complete = complete
+        try:
+            return await worker.run('Verify the existing artifact.', review=True)
+        finally:
+            await worker.client.close()
+
+    if eventually_succeeds:
+        assert asyncio.run(run()) == {'status': 'passed'}
+    else:
+        with pytest.raises(ModelStreamInterrupted):
+            asyncio.run(run())
+    assert reads == ['out']
+    assert len(requests) == 7
+    assert all(request == requests[1] for request in requests[1:])
+    assert requests[1]['messages'][-1]['role'] == 'tool'
