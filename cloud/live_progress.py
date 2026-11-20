@@ -61,9 +61,6 @@ class Progress:
                     f'({count(event.get("completed"))}/{count(event.get("required"))} items)')
         if kind == 'pr5_scheduler_event' and event.get('type') == 'contract_repair_stalled':
             return 'Stopped repeating repairs after two unchanged attempts'
-        if kind == 'pr5_root_review_closeout':
-            return (f'Root reached {count(event.get("inspection_turns"))} inspection turns | '
-                    'requesting a verdict from existing evidence')
         if kind in ('pr5_root_review_started', 'pr5_root_review_finished'):
             review = f'Root review {count(event.get("round"))}'
             if kind == 'pr5_root_review_started':
