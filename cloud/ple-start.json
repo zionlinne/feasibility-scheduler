@@ -1,6 +1,6 @@
 {
   "task": "division-26-specifications",
   "mode": "api-encrypted-upload",
-  "launch_attempt": 25,
-  "reason": "Measure the first Division 26 submission with zero repair rounds"
+  "launch_attempt": 26,
+  "reason": "Evaluate Division 26 with guide text checks and the standard three-repair limit"
 }
