@@ -1,6 +1,6 @@
 {
   "task": "division-26-specifications",
   "mode": "api-encrypted-upload",
-  "launch_attempt": 26,
-  "reason": "Evaluate Division 26 with guide text checks and the standard three-repair limit"
+  "launch_attempt": 27,
+  "reason": "Evaluate the guide revision check with one allowed repair"
 }
