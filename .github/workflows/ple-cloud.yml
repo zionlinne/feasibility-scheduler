@@ -1,7 +1,7 @@
 name: PLE single task on cloud FBS API
 on:
   push:
-    branches: ['experiment/ple-local-adapter-20261117']
+    branches: ['runtime/ple-lite-trial-20261122']
     paths: ['cloud/ple-start.json']
   workflow_dispatch:
 permissions:
