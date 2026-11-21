@@ -200,8 +200,8 @@ async def prepare_contract(candidate, *, worker, tasks, source, checkers, aliase
         'Root requires precondition/postcondition/verification. Composition requires nonempty '
         'method/consistency/verification/counterexample_review. Modules require the original '
         'modular-v1 fields, including explicit acceptance_limitations when local checks only '
-        'establish file existence/text. Explain the limitation and the actual Root check that '
-        'must establish the engineering obligation. The original PR5 validator will run again.\n'
+        'establish file existence/text. Explain the limitation and where verification happens '
+        'under the host profile. The original PR5 validator will run again.\n'
         'ALLOWED FIELD PATHS:\n'+json.dumps(slots)+'\nVALIDATION ERRORS:\n' + json.dumps(errors) + '\nORIGINAL TASK:\n' + source +
         '\nHOST PROFILE:\n' + json.dumps(tasks[0].payload.get('acceptance_profile')) +
         '\nSAME CANDIDATE TO CORRECT:\n' + json.dumps(candidate))

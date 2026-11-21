@@ -586,8 +586,11 @@ class Delivery:
             # Format unknowns are explicit and passed to Root for actual parser verification.
             return {'status': status, 'detail': '; '.join(failures) if failures else json.dumps(evidence)}, evidence
 
-    def final_message(self, workspace, accepted):
+    def final_message(self, workspace, accepted, *, direct_delivery=False):
         messages = [workspace/f['artifact'] for f in self.spec['files'] if f['kind'] == 'final_message']
         text = '\n'.join(p.read_text(encoding='utf8') for p in messages if p.is_file())
         paths = [f['path'] for f in self.spec['files'] if f['kind'] != 'final_message'] + [a['path'] for a in self.spec['archives']]
-        return (text + '\n\n' if text else '') + 'PR5 host acceptance=' + str(accepted) + '. Requested paths: ' + ', '.join(paths)
+        verdict = f'PR5 host acceptance={accepted}'
+        if direct_delivery:
+            verdict = f'FBS delivery checks passed={accepted}. Engineering evaluation: official grader'
+        return (text + '\n\n' if text else '') + verdict + '. Requested paths: ' + ', '.join(paths)

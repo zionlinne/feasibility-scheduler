@@ -2,16 +2,19 @@
 
 `serve.py` passes the official session to `pr5_adapter.solve`. The adapter invokes
 PR5's unchanged `run_legacy_doc` with NativeClient, `policy=rewrite`, modular-v1
-planning and the original acceptance, concurrency and bounded repair policies.
-It does not install a plan/work/verify role graph or add stage/call-count budgets.
+planning and the original concurrency policy. The PLE submission sets
+`FBS_PLE_DIRECT_DELIVERY=1`: FBS checks the formal Worker delivery, and the
+official grader evaluates the engineering. This mode runs zero contract repairs
+and skips model-based Root review. Early delivery snapshots remain available.
+Unset the flag to use the adapter’s Root review and configured repair policy.
 
 ## Task I/O
 
 An explicit single-ZIP brief with a named file table can be imported directly.
 Other layouts use one read-only model I/O import before PR5 contract generation.
 That import declares requested files and explicitly specified archive membership;
-it does not solve the task. Root must check the declaration against the original
-brief, including omissions. No task-ID routing or benchmark answers are included.
+it does not solve the task. The Worker checks the declaration against the original
+brief and Root rechecks it in review mode. No task-ID routing or benchmark answers are included.
 
 UTF-8 deliverables use PR5's original text delivery. Binary files are generated
 inside the task container through the official tools. A separately owned JSON
@@ -28,7 +31,7 @@ tasks. These mechanisms have not yet been validated over all 29 public tasks.
   declared member set, verifies exact destination, archive membership and member
   hashes, detects binary changes against the PR5 receipts, and reports actual
   initial explicit-read order and first complete candidate operation.
-- `ple-root-review`: fresh conversation of the configured model; reopens actual
+- `ple-root-review` (review mode): fresh conversation of the configured model; reopens actual
   outputs and uses official task tools to check engineering, public constraints,
   citations and format checks that need a domain parser. A model review is not
   licensed approval, a hidden-score certificate, or the official grader.

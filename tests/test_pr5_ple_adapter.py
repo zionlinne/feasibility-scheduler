@@ -582,6 +582,80 @@ def test_explicit_final_zip_does_not_package_input_or_alternative_formats():
     }
 
 
+@pytest.mark.parametrize('retain_guide', [True, False])
+def test_direct_ple_delivery_checks_formal_zip_without_root_or_repair(tmp_path, monkeypatch, retain_guide):
+    from feasibility_scheduler.adapters.contract_checks import requirement_ledger
+
+    archive = tmp_path/'output'/'submission.zip'
+    archive.parent.mkdir()
+    original = ' '.join(f'guideword{i}' for i in range(200))
+    (tmp_path/'26 00 01.SEC').write_text(f'<SPEC>{original}</SPEC>')
+    brief = (f'Write your deliverable to `{archive}`.\n'
+             '`specs/`: **one `.docx` per section**. Edit the guide specification for each section.')
+    spec = declared_package(brief, str(tmp_path))
+    receipt = spec['files'][0]['artifact']
+    requirements = [row['id'] for row in requirement_ledger(brief)]
+    plan = {
+        'version': 2, 'unresolved': [], 'requirements': [{'id': rid} for rid in requirements],
+        'root': {'precondition': 'Guide is provided', 'postcondition': 'Issue the ZIP',
+                 'verification': 'Check the recorded delivery'},
+        'modules': [{'id': 'submission', 'owned_files': [receipt], 'execution_dependencies': [],
+                     'interface_dependencies': [], 'invariants': ['Retain guide clauses'],
+                     'precondition': 'Guide exists', 'postcondition': 'Package an edited section',
+                     'verification': 'Inspect the ZIP', 'handoff': 'Provide ZIP for scoring',
+                     'boundary': 'Single declared ZIP', 'estimated_tokens': 1000,
+                     'local_checks': ['receipt'], 'acceptance_limitations': 'Official grader reviews engineering'}],
+        'composition': {'method': 'Verify the supplied ZIP', 'consistency': 'One candidate version',
+                        'verification': 'Apply package evidence checks', 'counterexample_review': 'Report broken ZIP'},
+        'checks': [{'id': 'receipt', 'kind': 'file_exists', 'path': receipt, 'requirements': requirements},
+                   {'id': 'package', 'kind': 'external', 'name': 'ple-package-evidence',
+                    'read_paths': [receipt], 'requirements': requirements}],
+        'acceptance_assignments': [
+            {'id': 'files', 'category': 'delivery', 'requirements': requirements,
+             'owners': ['submission'], 'checks': ['receipt'], 'scope': 'local'},
+            {'id': 'contents', 'category': 'package_execution', 'requirements': requirements,
+             'owners': ['__contract_composition__'], 'checks': ['package'], 'scope': 'root'}],
+        'decompositions': [],
+    }
+    calls, events = [], []
+
+    class Worker:
+        def __init__(self, session, *, direct_delivery):
+            assert direct_delivery
+
+        async def run(self, prompt, *, planning=False, review=False, continuing=False, **kwargs):
+            assert not review and not continuing and not kwargs.get('protocol_feedback')
+            calls.append('plan' if planning else 'write')
+            if planning:
+                assert 'ple-root-review' not in prompt
+                return plan
+            xml = (f'<w:document xmlns:w="{WORD_XML[1:-1]}"><w:body>'
+                   '<w:p><w:r><w:t>SECTION 26 00 01</w:t></w:r></w:p>'
+                   f'<w:p><w:r><w:t>{original if retain_guide else "rewritten"}</w:t></w:r></w:p>'
+                   '</w:body></w:document>')
+            binary = io.BytesIO()
+            with zipfile.ZipFile(binary, 'w') as doc:
+                doc.writestr('word/document.xml', xml)
+            with zipfile.ZipFile(archive, 'w') as package:
+                package.writestr('specs/26.docx', binary.getvalue())
+            return {'ok': True, 'files': {receipt: json.dumps({'path': str(archive)})}}
+
+    monkeypatch.setenv('FBS_PLE_DIRECT_DELIVERY', '1')
+    monkeypatch.setenv('FBS_PLE_CONTRACT_REPAIR_LIMIT', '3')
+    monkeypatch.delenv('FBS_PLE_SAVE_FIRST_DELIVERY', raising=False)
+    monkeypatch.setattr(adapter, 'ModelWorker', Worker)
+    monkeypatch.setattr(adapter, 'event', lambda kind, **fields: events.append((kind, fields)))
+    session = LocalTaskSession()
+    session.instruction, session.workdir = brief, str(tmp_path)
+    result = asyncio.run(adapter.solve(session))
+    assert calls == ['plan', 'write']
+    assert f'FBS delivery checks passed={retain_guide}' in result
+    assert archive.is_file()
+    expected = 'passed' if retain_guide else 'failed'
+    assert any(kind == 'pr5_guide_revision_checked' and f['status'] == expected for kind, f in events)
+    assert not any(kind == 'pr5_root_review_started' or f.get('repair_round') for kind, f in events)
+
+
 def test_root_review_repairs_declared_outputs_with_pr5(tmp_path, monkeypatch):
     from dataclasses import replace
     from feasibility_scheduler.adapters.legacy_doc import run_legacy_doc

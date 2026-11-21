@@ -70,6 +70,8 @@ class Progress:
                 return f'{review} finished ({status})'
             return None
         if kind == 'pr5_finished' and type(event.get('ok')) is bool:
+            if event.get('direct_delivery') is True:
+                return f'FBS finished (delivery checks passed={event["ok"]}); official grading next'
             return f'FBS finished (accepted={event["ok"]})'
 
         phase = event.get('phase')

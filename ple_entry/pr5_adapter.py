@@ -22,15 +22,21 @@ def event(kind, **values):
     print(json.dumps({'event':kind,**values}),flush=True)
 
 
-def host_profile():
-    return {'id':'ple-engineering-v1','categories':[
+def host_profile(*, direct_delivery=False):
+    categories = [
         {'id':'delivery','description':'Required files are complete and parseable','applicable':True,
          'allowed_kinds':['file_exists','text_contains','json_equals','json_match','external'],
-         'checker_names':['ple-format','ple-package-evidence','ple-root-review']},
+         'checker_names':['ple-format','ple-package-evidence']},
         {'id':'package_execution','description':'Exact delivery paths, current archive members and actual host execution/read-order evidence',
          'applicable':True,'allowed_kinds':['external'],'checker_names':['ple-package-evidence']},
-        {'id':'engineering','description':'Original engineering obligations and cross-file consistency are substantively checked',
-         'applicable':True,'allowed_kinds':['external'],'checker_names':['ple-root-review']}]}
+    ]
+    if direct_delivery:
+        return {'id':'ple-direct-delivery-v1','categories':categories}
+    categories[0]['checker_names'].append('ple-root-review')
+    categories.append({'id':'engineering',
+        'description':'Original engineering obligations and cross-file consistency are substantively checked',
+        'applicable':True,'allowed_kinds':['external'],'checker_names':['ple-root-review']})
+    return {'id':'ple-engineering-v1','categories':categories}
 
 
 def parse_object(text):
@@ -142,13 +148,14 @@ class ModelStreamInterrupted(ValueError):
 
 
 class ModelWorker:
-    def __init__(self,session,delivery=None):
+    def __init__(self,session,delivery=None,*,direct_delivery=False):
         from openai import AsyncOpenAI
         self.session=session
         self.client=AsyncOpenAI(max_retries=3,timeout=max(1,session.time_left() or 21600))
         self.model=os.environ['MODEL_NAME']
         self.stream_model=os.environ.get('FBS_PLE_MODEL_STREAM') == '1'
         self.delivery=delivery
+        self.direct_delivery=direct_delivery
 
     async def complete(self, phase, started, **kwargs):
         completions = self.client.chat.completions
@@ -209,10 +216,19 @@ class ModelWorker:
             rules+=('This is PR5 contract generation, not solving the engineering problem. '
                     'Collected small text source documents are provided below. Use that material and return '
                     'the contract in one response; leave design calculations to dispatched work units. '
-                    'Registered host checker ple-format checks delivery parsing only. Registered host '
-                    'checker ple-root-review is a fresh model review that inspects actual files and '
-                    'recomputes engineering constraints with task tools. It returns failed or unverified '
-                    'when evidence is inadequate. It is not a professional certification or the official grader. ')
+                    'Registered host checker ple-format checks delivery parsing only. ')
+            if self.direct_delivery:
+                rules+=('The host profile covers delivery and executable package evidence. The official grader '
+                        'evaluates engineering after handoff. Keep all source requirements and their actual '
+                        'design, calculation and evidence obligations in the Worker contract. Link source IDs '
+                        'to available checks for their delivered evidence, describing the limits of those '
+                        'checks in acceptance_limitations and handoff. Official engineering evaluation is '
+                        'available downstream, so its absence from the host checkers is not a blocker. ')
+            else:
+                rules+=('Registered host checker ple-root-review is a fresh model review that inspects actual '
+                        'files and recomputes engineering constraints with task tools. It returns failed or '
+                        'unverified when evidence is inadequate. It is not a professional certification or '
+                        'the official grader. ')
             rules+=('PR5 contract paths MUST use the exact canonical relative names in MODULES. '
                     'Absolute paths in TASK describe the remote environment, not contract paths. '
                     'Provided-material check paths use their exact registered provided/ names. '
@@ -269,10 +285,15 @@ class ModelWorker:
                     'version to its declared remote output path as soon as it is complete. '
                     'Modify only remote outputs mapped from your current owned_files or repair_files; '
                     'the full delivery map grants no permission to overwrite another module output. '
-                    'The host owns only the packaging of archives explicitly listed in archives. '
-                    'Engineering review must independently verify every required deliverable, all '
-                    'unknown format checks, and the completeness of this I/O map against the original '
-                    'task; omissions or invented requirements fail review. ')
+                    'The host owns only the packaging of archives explicitly listed in archives. ')
+            if self.direct_delivery:
+                rules+=('Check every required deliverable and the completeness of this I/O map against '
+                        'the original task. When the assigned work and checks are complete, return the '
+                        'formal delivery for official evaluation. ')
+            else:
+                rules+=('Engineering review must independently verify every required deliverable, all '
+                        'unknown format checks, and the completeness of this I/O map against the original '
+                        'task; omissions or invented requirements fail review. ')
             guide = self.delivery.guide_config
             if guide is not None and planning and not protocol_feedback:
                 rules+=('The existing ple-package-evidence checker also compares the delivered DOCX '
@@ -443,7 +464,8 @@ async def solve(session):
     initial_reads=first_reads(task_source,root)
     required_reads+=initial_reads
     references=await source_materials(session,root,initial_reads)
-    worker=ModelWorker(session)
+    direct_delivery=os.environ.get('FBS_PLE_DIRECT_DELIVERY') == '1'
+    worker=ModelWorker(session,direct_delivery=direct_delivery)
     spec=declared_package(session.instruction+'\n'+task_source,root)
     if spec is None:
         event('pr5_task_io_import_started')
@@ -468,10 +490,13 @@ async def solve(session):
         directory=Path(temporary);bridge=directory/'native';bridge.mkdir()
         source=directory/'source';source.mkdir()
         (source/'TASK.md').write_text(task_source,encoding='utf8')
-        profile=host_profile()
+        profile=host_profile(direct_delivery=direct_delivery)
+        checker_names=['ple-format','ple-package-evidence']
+        if not direct_delivery:
+            checker_names.append('ple-root-review')
         task_input={'modules':[{'module_id':'submission','title':'Complete the requested engineering package',
           'owned_files':names,'outputs':names,'deps':[],'estimated_tokens':24000}],
-          'reference_files':references,'external_checker_names':['ple-format','ple-package-evidence','ple-root-review'],
+          'reference_files':references,'external_checker_names':checker_names,
           'acceptance_profile':profile}
         (source/'TASK_INPUT.json').write_text(json.dumps(task_input),encoding='utf8')
 
@@ -528,14 +553,15 @@ async def solve(session):
             return checked
 
         remaining=max(1,session.time_left() or 21600)
-        repair_limit=int(os.environ.get('FBS_PLE_CONTRACT_REPAIR_LIMIT','1'))
+        checkers={'ple-format':delivery.local_check,'ple-package-evidence':package_checker}
+        if not direct_delivery:
+            checkers['ple-root-review']=root_checker
+        repair_limit=0 if direct_delivery else int(os.environ.get('FBS_PLE_CONTRACT_REPAIR_LIMIT','1'))
         cfg=LegacyDocConfig(task_input_path=source/'TASK_INPUT.json',task_md_path=source/'TASK.md',
           workdir=directory/'run',client_kind='native',native_bridge_dir=bridge,
           policy='rewrite',acceptance='loose',timeout_seconds=remaining,lease_seconds=remaining+60,
            contract_repair_limit=repair_limit,contract_stop_on_stall=True,
-          acceptance_profile=profile,external_checkers={
-            'ple-format':delivery.local_check,'ple-package-evidence':package_checker,
-            'ple-root-review':root_checker})
+          acceptance_profile=profile,external_checkers=checkers)
         validation_tasks=[replace(t,payload={**t.payload,'acceptance_profile':profile,
                           'planning_standard':cfg.planning_standard})
                           for t in build_legacy_tasks(task_input,task_md=task_source)]
@@ -602,7 +628,7 @@ async def solve(session):
             event('pr5_native_response',task_id=task_id)
 
         event('pr5_runner_started',policy=cfg.policy,max_concurrency=cfg.max_concurrency,
-              contract_repair_limit=cfg.contract_repair_limit,
+              contract_repair_limit=cfg.contract_repair_limit,direct_delivery=direct_delivery,
               official_seconds_remaining=round(remaining),source_files=len(references))
         try:
             while not done.done():
@@ -620,8 +646,9 @@ async def solve(session):
                 final_check,_=await delivery.publish(workspace)
                 if final_check['status']!='passed':
                     raise ValueError('Final delivery integrity failed: '+final_check['detail'])
-            event('pr5_finished',ok=outcome.ok,states={k:v.value for k,v in outcome.states.items()})
-            return delivery.final_message(workspace,outcome.ok)
+            event('pr5_finished',ok=outcome.ok,direct_delivery=direct_delivery,
+                  states={k:v.value for k,v in outcome.states.items()})
+            return delivery.final_message(workspace,outcome.ok,direct_delivery=direct_delivery)
         except Exception as exc:
             event('pr5_run_error',error_type=type(exc).__name__,detail=str(exc)[:500])
             raise
