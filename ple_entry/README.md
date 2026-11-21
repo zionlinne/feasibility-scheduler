@@ -3,17 +3,22 @@
 `serve.py` passes the official session to `pr5_adapter.solve`. The adapter invokes
 PR5's unchanged `run_legacy_doc` with NativeClient, `policy=rewrite`, modular-v1
 planning and the original concurrency policy. The PLE submission sets
-`FBS_PLE_DIRECT_DELIVERY=1`: FBS checks the formal Worker delivery, and the
-official grader evaluates the engineering. This mode runs zero contract repairs
-and skips model-based Root review. Early delivery snapshots remain available.
-Unset the flag to use the adapter’s Root review and configured repair policy.
+`FBS_PLE_LITE=1`. The model proposes file ownership, dependencies and optional
+cohesion groups. The host builds the delivery checks and applies PR5 split and
+merge operators before dispatch. Workers produce their assigned deliverables,
+then the host validates and packages them for official grading. Lite runs zero
+contract repairs and skips model-based Root review. Early ZIP snapshots remain
+available. With Lite disabled, `FBS_PLE_DIRECT_DELIVERY=1` uses the full planner
+with direct delivery. With both flags disabled, Root review and configured repairs apply.
 
 ## Task I/O
 
 An explicit single-ZIP brief with a named file table can be imported directly.
 Other layouts use one read-only model I/O import before PR5 contract generation.
 That import declares requested files and explicitly specified archive membership;
-it does not solve the task. The Worker checks the declaration against the original
+it does not solve the task. Lite can expose separate ZIP members when the public task or
+scope of work identifies the complete set. It gives each member to its declared
+owner and stages the files before assembling the requested ZIP. The Worker checks the declaration against the original
 brief and Root rechecks it in review mode. No task-ID routing or benchmark answers are included.
 
 UTF-8 deliverables use PR5's original text delivery. Binary files are generated

@@ -111,6 +111,7 @@ class LegacyDocConfig:
     integration_files: tuple[str, ...] | None = None
     planning_standard: str = "modular-v1"
     contract_stop_on_stall: bool = False
+    settle_functional_rewrites: bool = False
 
 
 
@@ -957,7 +958,8 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
             external_gates=external,
         )
         if policy == "rewrite":
-            executor = GraphRewriteExecutor(tasks, enable_rewrite=True, **exec_kwargs)
+            executor = GraphRewriteExecutor(tasks, enable_rewrite=True,
+                settle_functional_rewrites=cfg.settle_functional_rewrites, **exec_kwargs)
         else:
             executor = PromptFromPayloadExecutor(tasks, **exec_kwargs)
         executor.contract_repair_limit = cfg.contract_repair_limit

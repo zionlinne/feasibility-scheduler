@@ -16,6 +16,7 @@ from mcp_tools import TaskMcpTools, TOOLS as MCP_TOOLS
 from ple_delivery import (Delivery, EvidenceSession, declared_guide_revision, declared_item_updates,
                           declared_package, first_reads, normalize_spec, task_root)
 from ple_contract import prepare_contract
+from ple_lite import plan_delivery
 
 
 def event(kind, **values):
@@ -186,7 +187,7 @@ class ModelWorker:
             raise error('Model stream ended before the completion finished')
         return response
 
-    async def run(self,prompt,*,planning=False,review=False,importing=False,protocol_feedback=False,owned=(),continuing=False):
+    async def run(self,prompt,*,planning=False,review=False,importing=False,protocol_feedback=False,owned=(),continuing=False,lite_planning=False,inspect_scope=False):
         rules=(('You import task I/O for the PR5 adapter. ' if importing else
                 'You execute a request dispatched by the existing PR5 FBS harness. ')+
           'Follow its current contract, ownership, checks and output JSON schema. '
@@ -212,6 +213,10 @@ class ModelWorker:
                     'is required. final_message needs no path. archives is ONLY for a package whose full '
                     'member set the brief explicitly declares; otherwise declare the archive as a binary file. '
                     'Do not include input/reference files as outputs. Never invent required files. ')
+        elif lite_planning:
+            rules+=('Plan the work only. Give each deliverable one owner and preserve every requirement. '
+                    'The host supplies deterministic delivery checks and schedules the work. '
+                    'Use available tools only to read task scope and delivery instructions. ')
         elif planning:
             rules+=('This is PR5 contract generation, not solving the engineering problem. '
                     'Collected small text source documents are provided below. Use that material and return '
@@ -327,8 +332,9 @@ class ModelWorker:
                             'A plain final ZIP or a final summary cannot establish this sequence. '
                             'Items already recorded: '+json.dumps(sorted({r['item'] for r in self.delivery.item_updates}))+'. ')
         write_tools = [WRITE_TOOL] + ([RECORD_ITEM_TOOL] if can_record_item else [])
-        tools=[] if planning else READ_TOOLS+([] if review or importing else write_tools)+MCP_TOOLS
-        router=TaskMcpTools(self.session,readonly=review or importing)
+        readonly=review or importing or lite_planning
+        tools=[] if planning and not inspect_scope else READ_TOOLS+([] if readonly else write_tools)+MCP_TOOLS
+        router=TaskMcpTools(self.session,readonly=readonly)
         messages=[{'role':'system','content':rules},{'role':'user','content':prompt}]
         operations=0
         calls=0
@@ -403,7 +409,7 @@ class ModelWorker:
                         except UnicodeError:
                             result={'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest(),
                                     'detail':'Binary input: use task bash or MCP to parse/inspect it; this text is not its content'}
-                    elif fn.name=='write_file' and not review:
+                    elif fn.name=='write_file' and not readonly:
                         result={'bytes':await self.session.write_file(args['path'],args['content'])}
                     elif fn.name=='record_item_zip' and can_record_item:
                         result=await self.delivery.record_item_update(args['item_id'])
@@ -412,7 +418,7 @@ class ModelWorker:
                     else: raise ValueError('Tool not available')
                 except Exception as exc:
                     result={'error_type':type(exc).__name__,'detail':str(exc)[:1000]}
-                if (self.delivery is not None and not review and not importing
+                if (self.delivery is not None and not readonly
                         and self.delivery.item_latest is None and fn.name in ('bash','write_file','task_mcp_call')):
                     try:
                         evidence=await self.delivery.checkpoint()
@@ -464,7 +470,8 @@ async def solve(session):
     initial_reads=first_reads(task_source,root)
     required_reads+=initial_reads
     references=await source_materials(session,root,initial_reads)
-    direct_delivery=os.environ.get('FBS_PLE_DIRECT_DELIVERY') == '1'
+    lite=os.environ.get('FBS_PLE_LITE') == '1'
+    direct_delivery=lite or os.environ.get('FBS_PLE_DIRECT_DELIVERY') == '1'
     worker=ModelWorker(session,direct_delivery=direct_delivery)
     spec=declared_package(session.instruction+'\n'+task_source,root)
     if spec is None:
@@ -481,10 +488,16 @@ async def solve(session):
             guide_config['masters'] = await delivery.run_audit(root, ' --guide-masters')
         except ValueError:
             event('pr5_guide_sources_unavailable')
+    worker.delivery=delivery
+    lite_plan=None
+    if lite:
+        event('pr5_lite_planning_started',deliverables=len(delivery.names))
+        lite_plan=await plan_delivery(worker,task_source,delivery)
+        spec=delivery.spec
+        event('pr5_lite_planning_finished',modules=len(lite_plan['modules']))
     names=delivery.names
     aliases=delivery.aliases
     aliases.update({str(PurePosixPath(root)/name.removeprefix('provided/')):name for name in references})
-    worker.delivery=delivery
     loop=asyncio.get_running_loop()
     with tempfile.TemporaryDirectory(prefix='pr5-ple-') as temporary:
         directory=Path(temporary);bridge=directory/'native';bridge.mkdir()
@@ -498,6 +511,8 @@ async def solve(session):
           'owned_files':names,'outputs':names,'deps':[],'estimated_tokens':24000}],
           'reference_files':references,'external_checker_names':checker_names,
           'acceptance_profile':profile}
+        if lite_plan is not None:
+            task_input['contract_plan']=lite_plan
         (source/'TASK_INPUT.json').write_text(json.dumps(task_input),encoding='utf8')
 
         review_round=0
@@ -561,7 +576,7 @@ async def solve(session):
           workdir=directory/'run',client_kind='native',native_bridge_dir=bridge,
           policy='rewrite',acceptance='loose',timeout_seconds=remaining,lease_seconds=remaining+60,
            contract_repair_limit=repair_limit,contract_stop_on_stall=True,
-          acceptance_profile=profile,external_checkers=checkers)
+          acceptance_profile=profile,external_checkers=checkers,settle_functional_rewrites=lite)
         validation_tasks=[replace(t,payload={**t.payload,'acceptance_profile':profile,
                           'planning_standard':cfg.planning_standard})
                           for t in build_legacy_tasks(task_input,task_md=task_source)]
@@ -582,7 +597,8 @@ async def solve(session):
                     continue
                 seen_events.add(row['event_id'])
                 event('pr5_scheduler_event',type=row['type'],task_id=row.get('task_id'),
-                      state=row.get('new_state'),sequence=row.get('sequence'))
+                      state=row.get('new_state'),sequence=row.get('sequence'),
+                  rewrite_kind=row.get('details',{}).get('kind') if row['type']=='graph_rewrite_applied' else None)
 
         async def execute(request_path):
             request=json.loads(request_path.read_text(encoding='utf8'))
@@ -628,7 +644,7 @@ async def solve(session):
             event('pr5_native_response',task_id=task_id)
 
         event('pr5_runner_started',policy=cfg.policy,max_concurrency=cfg.max_concurrency,
-              contract_repair_limit=cfg.contract_repair_limit,direct_delivery=direct_delivery,
+              contract_repair_limit=cfg.contract_repair_limit,direct_delivery=direct_delivery,lite=lite,
               official_seconds_remaining=round(remaining),source_files=len(references))
         try:
             while not done.done():

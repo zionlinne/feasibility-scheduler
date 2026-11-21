@@ -29,9 +29,10 @@ class GraphRewriteExecutor(ContractExecutionMixin, ArtifactMetadataExecutorMixin
     额外覆盖 `_prompt`：与 legacy 适配一致，优先 payload["prompt_text"]。
     """
 
-    def __init__(self, *args: Any, enable_rewrite: bool = True, **kwargs: Any) -> None:
+    def __init__(self, *args: Any, enable_rewrite: bool = True, settle_functional_rewrites: bool = False, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.enable_rewrite = bool(enable_rewrite)
+        self.settle_functional_rewrites = settle_functional_rewrites
         self.rewrite_history: list[dict[str, Any]] = []
         self._rewrite_lock = asyncio.Lock()
         self._last_fingerprint: str | None = None
@@ -67,7 +68,10 @@ class GraphRewriteExecutor(ContractExecutionMixin, ArtifactMetadataExecutorMixin
 
     async def _release(self) -> list[str]:
         if self.enable_rewrite:
-            await self._maybe_rewrite(trigger="before_release")
+            selected = await self._maybe_rewrite(trigger="before_release")
+            # Functional splits replace a declared parent once. Merges reduce task count.
+            while self.settle_functional_rewrites and selected is not None and selected.kind in {"split", "merge"}:
+                selected = await self._maybe_rewrite(trigger="before_release")
         return await super()._release()
 
     async def _maybe_rewrite(self, *, trigger: str) -> RewriteCandidate | None:
@@ -92,7 +96,9 @@ class GraphRewriteExecutor(ContractExecutionMixin, ArtifactMetadataExecutorMixin
                     if selected is not None:
                         break
             if selected is None:
-                selected, all_cands = decide_rewrite(self.tasks, states=states)
+                selected, all_cands = decide_rewrite(
+                    self.tasks, states=states, allow_document_merge=self.settle_functional_rewrites,
+                )
             else:
                 all_cands = [selected]
             for cand in all_cands:

@@ -38,6 +38,8 @@ class Progress:
             return None
         kind = event.get('event')
         if kind == 'pr5_runner_started':
+            if event.get('lite') is True:
+                return 'FBS Lite started (direct delivery)'
             return f'FBS started (up to {count(event.get("contract_repair_limit"))} repairs)'
         if kind == 'pr5_task_io_import_started':
             return 'Identifying deliverables'
@@ -59,6 +61,9 @@ class Progress:
         if kind == 'pr5_item_zip_recorded':
             return (f'ZIP update {count(event.get("sequence"))} recorded '
                     f'({count(event.get("completed"))}/{count(event.get("required"))} items)')
+        if kind == 'pr5_scheduler_event' and event.get('type') == 'graph_rewrite_applied':
+            if event.get('rewrite_kind') in ('split', 'merge'):
+                return f'FBS applied task {event["rewrite_kind"]}'
         if kind == 'pr5_scheduler_event' and event.get('type') == 'contract_repair_stalled':
             return 'Stopped repeating repairs after two unchanged attempts'
         if kind in ('pr5_root_review_started', 'pr5_root_review_finished'):
