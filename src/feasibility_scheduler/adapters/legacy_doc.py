@@ -24,7 +24,7 @@ import json
 import os
 import subprocess
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -44,6 +44,8 @@ from feasibility_scheduler.models import Task
 from feasibility_scheduler.store import TaskStore
 from feasibility_scheduler.adapters.acs_text_extract import extract_delivery_map
 from feasibility_scheduler.adapters.artifact_request import ArtifactMetadataExecutorMixin
+from feasibility_scheduler.adapters.contract_runtime import ContractExecutionMixin
+from feasibility_scheduler.adapters.workspace_validation import workspace_file_checks
 
 
 def _to_plain(value: Any) -> Any:
@@ -101,6 +103,14 @@ class LegacyDocConfig:
     lease_seconds: float = 600.0
     timeout_seconds: float = 300.0
     copy_materials: bool = True
+    contract_repair_limit: int = 1
+    native_bridge_dir: Path | None = None
+    external_checkers: Mapping[str, Any] | None = None
+    acceptance_script: Path | None = None
+    acceptance_profile: Mapping[str, Any] | None = None
+    integration_files: tuple[str, ...] | None = None
+    planning_standard: str = "modular-v1"
+    contract_stop_on_stall: bool = False
 
 
 
@@ -221,7 +231,7 @@ class _ArtifactSink:
         }
 
 
-class PromptFromPayloadExecutor(ArtifactMetadataExecutorMixin, Executor):
+class PromptFromPayloadExecutor(ContractExecutionMixin, ArtifactMetadataExecutorMixin, Executor):
     """向后兼容扩展：若 payload 含 prompt_text 则用之，否则走内核默认 JSON dump。"""
 
     def _prompt(self, task_id: str) -> str:
@@ -378,6 +388,8 @@ def _module_prompt(
         + delivery_rules
         + "- 仅使用 Node.js 24 标准库；禁止第三方依赖。\n"
         "- 严格按题目行为实现，不要发明额外 API。\n"
+        "- 拆分后以 CURRENT EXECUTION CONTRACT 为准，通过共享接口使用其他任务的模块；"
+        "不要在一个文件中重复实现兄弟模块职责、使其交付物闲置。正式 Node 验收会记录实际模块加载与函数执行。\n"
         "- 若信息不足，仍须给出可 `node --check` 通过的最佳努力实现，并在 notes 说明假设。"
         "（仅对 .js/.mjs/.cjs；README.md 等非 JS 不要指望 node --check。）\n\n"
         "## 题目规格 TASK.md\n\n"
@@ -393,6 +405,9 @@ def build_legacy_tasks(
     module_ids: Iterable[str] | None = None,
 ) -> list[Task]:
     modules = list(task_input["modules"])
+    references = task_input.get("reference_files", {})
+    if not isinstance(references, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in references.items()):
+        raise ValueError("reference_files must map relative artifact paths to text contents")
     wanted = set(module_ids) if module_ids is not None else None
     if wanted is not None:
         missing = wanted - {m.get("module_id") for m in modules}
@@ -423,6 +438,8 @@ def build_legacy_tasks(
             module=m,
             sibling_files=[p for p in all_owned if p not in owned],
         )
+        if references:
+            prompt += "\nREAD-ONLY PROVIDED MATERIALS (do not overwrite)\n" + json.dumps(references, ensure_ascii=False)
         payload = {
             "module_id": mid,
             "title": m.get("title"),
@@ -432,6 +449,9 @@ def build_legacy_tasks(
             "deps": list(deps),
             "estimated_tokens": m.get("estimated_tokens"),
             "prompt_text": prompt,
+            "task_source": task_md,
+            "reference_files": references,
+            "external_checker_names": list(task_input.get("external_checker_names", [])),
         }
         tasks.append(
             Task(
@@ -740,42 +760,12 @@ def legacy_artifact_acceptor(
         if mode == "node-check":
             # 只对实际交付的 JS 文件做语法检查；非 JS 跳过。
             check_targets = written if delivery_mode == "file" else list(expected)
-            for path in check_targets:
-                target = sink.workspace / path
-                if not _is_node_checkable(path):
-                    checks.append(f"skip_node_check_non_js:{path}")
-                    continue
-                checks.append(f"node_check:{path}")
-                if not target.is_file():
-                    errors.append(f"落盘后找不到 {path}")
-                    continue
-                try:
-                    proc = subprocess.run(
-                        ["node", "--check", str(target)],
-                        capture_output=True,
-                        text=True,
-                        timeout=60,
-                        cwd=str(sink.workspace),
-                    )
-                except FileNotFoundError as exc:
-                    validator_errors.append(
-                        f"VALIDATOR_ERROR: node 不可用，无法执行 --check：{exc}"
-                    )
-                    continue
-                except (OSError, subprocess.TimeoutExpired) as exc:
-                    validator_errors.append(
-                        f"VALIDATOR_ERROR: node --check 无法执行：{exc}"
-                    )
-                    continue
-                if proc.returncode != 0:
-                    err = (proc.stderr or proc.stdout or "").strip()[:500]
-                    # 防御：若仍因扩展名被 node 拒绝，归为验收器错误而非产品代码失败
-                    if "ERR_UNKNOWN_FILE_EXTENSION" in err or "Unknown file extension" in err:
-                        validator_errors.append(
-                            f"VALIDATOR_ERROR: 对非 JS 文件调用了 node --check：{path}: {err}"
-                        )
-                    else:
-                        errors.append(f"node --check 失败 {path}: {err}")
+            for result in workspace_file_checks(sink.workspace, check_targets, mode, node_checkable=_is_node_checkable):
+                checks.extend(result["checks"])
+                if result["status"] == "failed":
+                    errors.append(result["detail"])
+                elif result["status"] == "unverified":
+                    validator_errors.append(result["detail"])
 
         if validator_errors:
             # 验收器配置/文件类型/运行时错误 → error 字段，不当产品代码 errors
@@ -811,13 +801,66 @@ def _prepare_workdir(cfg: LegacyDocConfig) -> tuple[Path, Path]:
 
 
 def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
+    if cfg.planning_standard != "modular-v1":
+        raise ValueError("unsupported host planning standard")
+    if not isinstance(cfg.contract_repair_limit, int) or isinstance(cfg.contract_repair_limit, bool) or cfg.contract_repair_limit < 0:
+        raise ValueError("contract_repair_limit must be a nonnegative integer")
     task_input = load_task_input(cfg.task_input_path)
+    task_input["reference_files"] = discover_reference_materials(
+        Path(cfg.task_md_path).parent, task_input.get("reference_files", {})
+    )
+    external_checkers = dict(cfg.external_checkers or {})
+    if cfg.acceptance_script is not None:
+        from .external_verifier import node_verifier
+        selected = set(cfg.module_ids) if cfg.module_ids is not None else None
+        execution_files = sorted({p for module in task_input["modules"]
+                                  if selected is None or module["module_id"] in selected
+                                  for p in module.get("owned_files", []) if isinstance(p, str) and _is_node_checkable(p)})
+        external_checkers["task-acceptance"] = node_verifier(cfg.acceptance_script, cfg.workdir,
+                                                          required_execution_files=execution_files)
+    task_input["external_checker_names"] = sorted(
+        set(task_input.get("external_checker_names", [])) | set(external_checkers)
+    )
     task_md = Path(cfg.task_md_path).read_text(encoding="utf-8")
+    profile = cfg.acceptance_profile if cfg.acceptance_profile is not None else task_input.get("acceptance_profile")
+    if cfg.acceptance_profile is not None and "acceptance_profile" in task_input and task_input["acceptance_profile"] != profile:
+        raise ValueError("conflicting host acceptance profiles in config and task input")
+    if profile is not None:
+        task_input["acceptance_profile"] = profile
     tasks = build_legacy_tasks(
         task_input, task_md=task_md, module_ids=cfg.module_ids
     )
+    integration_files = cfg.integration_files if cfg.integration_files is not None else task_input.get("integration_files")
+    if integration_files is not None:
+        from .integration import integration_task
+        integration_task(tasks, {}, integration_files)  # Host scope preflight before any model request.
+        if cfg.client_kind.strip().lower() in {"", "fake"}:
+            raise ValueError("integration requires a real or native client, not placeholder artifacts")
     run_dir, workspace = _prepare_workdir(cfg)
+    from .acceptance_profile import validate_profile, validate_responsibilities, bind_profile
+    if profile is not None:
+        preflight = {"phase": "capabilities", "status": "failed", "profile_id": profile.get("id") if isinstance(profile, dict) else None}
+        try:
+            validate_profile(profile, external_checkers)
+            preflight["status"] = "passed"
+        except ValueError as exc:
+            preflight["error"] = str(exc)
+            raise
+        finally:
+            (run_dir / "acceptance-preflight.json").write_text(json.dumps(preflight, ensure_ascii=False, indent=2), encoding="utf-8")
+        tasks = [replace(t, payload={**t.payload, "acceptance_profile": dict(profile)}) for t in tasks]
+    (run_dir / "effective-task-input.json").write_text(
+        json.dumps(task_input, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     sink = _ArtifactSink(workspace)
+    references = task_input.get("reference_files", {})
+    owned = {p for task in tasks for p in task.payload.get("owned_files", ())}
+    for path, content in references.items():
+        target = sink._safe_target(path)
+        if target is None or path in owned:
+            raise ValueError("reference material path must be safe and disjoint from output ownership")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
 
     kind = cfg.client_kind.strip().lower()
     if kind in {"", "fake"}:
@@ -830,12 +873,63 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
         if cfg.model:
             kwargs["model"] = cfg.model
         client = create_client("http", **kwargs)
+    elif kind == "native":
+        client = create_client("native", bridge_dir=cfg.native_bridge_dir or run_dir / "native-bridge",
+                               timeout_seconds=cfg.timeout_seconds)
     else:
         raise ValueError(f"未知 client: {cfg.client_kind!r}")
+
+    # Plan before dispatch; supplied plans also support reproducible offline runs.
+    from feasibility_scheduler.adapters.contract_plan import attach_plan, generate_plan
+
+    plan = task_input.get("contract_plan")
+    if plan is None and kind in {"http", "real", "native"}:
+        tasks = [replace(t, payload={**t.payload, "planning_standard": cfg.planning_standard}) for t in tasks]
+        plan = generate_plan(client, tasks, task_md, audit_dir=run_dir)
+    if plan is not None:
+        from feasibility_scheduler.adapters.contract_checks import requirement_ledger
+        if plan.get("version") != 2:
+            raise ValueError("runtime contract enforcement requires version 2; migrate textual contracts to executable checks")
+        if plan.get("requirements") != requirement_ledger(task_md):
+            raise ValueError("contract requirements differ from the original TASK source")
+        preflight = {"phase": "responsibilities", "status": "failed"}
+        try:
+            if profile is not None:
+                bind_profile(plan, profile)
+                from .acceptance_profile import complete_root_references
+                preflight["completed_root_references"] = complete_root_references(plan, tasks)
+            from .contract_plan import validate_plan
+            validate_plan(plan, tasks)
+            validate_responsibilities(plan, tasks, checkers=external_checkers)
+            preflight["status"] = "passed"
+        except ValueError as exc:
+            preflight["error"] = str(exc)
+            raise
+        finally:
+            if profile is not None:
+                (run_dir / "acceptance-preflight.json").write_text(json.dumps(preflight, ensure_ascii=False, indent=2), encoding="utf-8")
+        tasks = attach_plan(tasks, plan)
+        (run_dir / "contract.json").write_text(
+            json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        from feasibility_scheduler.adapters.contract_runtime import composition_task
+        root = composition_task(tasks, plan)
+        if integration_files is not None:
+            tasks.append(integration_task(tasks, plan, integration_files))
+            root = replace(root, dependencies=root.dependencies + (tasks[-1].id,),
+                           payload={**root.payload, "integration_required": True})
+        tasks.append(root)
+        if isinstance(client, _PlaceholderClient):
+            client = make_placeholder_client(tasks)
 
     store = TaskStore(run_dir / "state.sqlite3")
     log = EventLog(run_dir / "events.jsonl", run_id=run_dir.name)
     acceptor = legacy_artifact_acceptor(sink=sink, mode=cfg.acceptance)
+    if plan is not None:
+        from feasibility_scheduler.adapters.contract_runtime import ContractAcceptor
+        acceptor = ContractAcceptor(acceptor, sink, run_dir, repairable_files=owned,
+                                    external_checkers=external_checkers,
+                                    workspace_validator=lambda paths: workspace_file_checks(workspace, paths, cfg.acceptance))
 
     # 外部门禁：只登记当前启用的适配验收模式（judge_run 要求全部为真）
     external = {
@@ -866,6 +960,8 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
             executor = GraphRewriteExecutor(tasks, enable_rewrite=True, **exec_kwargs)
         else:
             executor = PromptFromPayloadExecutor(tasks, **exec_kwargs)
+        executor.contract_repair_limit = cfg.contract_repair_limit
+        executor.contract_stop_on_stall = cfg.contract_stop_on_stall
         outcome = executor.run()
         rewrite_history = list(getattr(executor, "rewrite_history", []))
     finally:
@@ -884,13 +980,15 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
         "module_ids": [t.id for t in tasks],
         "final_task_ids": list(outcome.states.keys()),
         "rewrite_history": rewrite_history,
+        "contract_check_results": getattr(acceptor, "results", {}),
+        "acceptance_profile_id": profile["id"] if profile is not None else None,
         "workdir": str(run_dir),
         "workspace": str(workspace),
         "written_files": list(sink.written),
         "delivery": sink.delivery_snapshot(),
         "limitations": [
-            "旧题完整 Node 行为验收（33 ops / CLI / HTTP / 持久化）未接入本适配层；"
-            f"当前 acceptance={cfg.acceptance}。",
+            f"基础交付验收模式为 {cfg.acceptance}；业务验收能力由宿主注册检查器提供："
+            f"{sorted(external_checkers)}。检查器已注册不代表业务验收已通过。",
             "模型须返回 JSON；推荐 manifest/file 逐文件交付；批量 files 仍兼容但易触顶。"
             "触顶截断标 OUTPUT_TRUNCATED；JSON 失败且抽不出文件为 "
             "invalid_format_no_artifact，只允许一次 ACS fence 格式修复。",
@@ -910,6 +1008,29 @@ def run_legacy_doc(cfg: LegacyDocConfig) -> RunOutcome:
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     return outcome
+
+
+def discover_reference_materials(materials_dir: Path, supplied: Mapping[str, str]) -> dict[str, str]:
+    """Register the legacy task's supplied metadata/public fixtures, never private or source code."""
+    if not isinstance(supplied, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in supplied.items()):
+        raise ValueError("reference_files must map relative artifact paths to text contents")
+    root = materials_dir.resolve()
+    files = [root / "package.json"]
+    public = root / "public"
+    if public.exists():
+        public.resolve().relative_to(root)
+        files.extend(public.rglob("*"))
+    result = dict(supplied)
+    for source in files:
+        if not source.is_file():
+            continue
+        source.resolve().relative_to(root)
+        relative = source.relative_to(root).as_posix()
+        content = source.read_text(encoding="utf-8")
+        if relative in result and result[relative] != content:
+            raise ValueError(f"reference_files conflicts with supplied material: {relative}")
+        result[relative] = content
+    return result
 
 
 def default_paths() -> dict[str, Path]:

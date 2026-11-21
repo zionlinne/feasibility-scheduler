@@ -1,0 +1,10 @@
+# Linux read-only portability smoke test, not the official evaluator build.
+FROM python:3.12-slim
+WORKDIR /opt/harness/src
+COPY ple_entry/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY src ./src
+COPY ple_entry ./ple_entry
+ENV PYTHONDONTWRITEBYTECODE=1
+USER 1000
+CMD ["python", "ple_entry/serve.py"]

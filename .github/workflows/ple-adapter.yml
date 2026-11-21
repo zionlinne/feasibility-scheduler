@@ -1,0 +1,88 @@
+name: PR5 baseline and PLE interface checks
+on:
+  push:
+    branches: ['experiment/ple-local-adapter-20261117']
+  pull_request:
+    paths: ['ple_entry/**', 'tests/test_ple*', 'tests/test_contract_runtime.py', 'cloud/**', '.github/actions/ple-evaluate/**', 'submission.yaml', 'requirements.txt']
+permissions:
+  contents: read
+jobs:
+  adapter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r ple_entry/requirements.txt pytest==8.4.2 PyYAML==6.0.3 openpyxl==3.1.5
+      - name: Targeted PLE interface checks (no live models)
+        run: >-
+          python -m pytest tests/test_ple_interfaces.py tests/test_pr5_ple_adapter.py tests/test_ple_gateway.py
+          tests/test_ple_live_progress.py tests/test_ple_api.py tests/test_events.py
+          tests/test_contract_runtime.py::test_stop_after_two_repairs_with_unchanged_files_and_checks
+          tests/test_contract_runtime.py::test_local_passes_root_fails_then_bounded_feedback_repairs -q
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+          FEASIBILITY_RUN_INTEGRATION: '0'
+      - uses: actions/checkout@v4
+        with:
+          repository: google-research/ple
+          ref: 8320f0402fdca9f42476607f72bcfd5271cd50c9
+          path: official-ple
+      - name: Official submission schema validation only
+        run: PYTHONPATH=official-ple python -c "from pathlib import Path; from kit.spec import load; s=load(Path('.')); print(s.name, s.model.api)"
+      - name: Prepare synthetic checkpoint upload
+        shell: bash
+        run: |
+          fixture="$RUNNER_TEMP/ple-checkpoint-fixture"
+          mkdir -p "$fixture"/{kit,bin,operator/artifact-client}
+          cp .github/actions/ple-evaluate/package{,-lock}.json "$fixture/operator/artifact-client/"
+          npm ci --prefix "$fixture/operator/artifact-client" --ignore-scripts --no-audit --no-fund
+          echo "PLE_OPERATOR=$fixture/operator" >> "$GITHUB_ENV"
+          echo "PLE_KIT=$fixture/kit" >> "$GITHUB_ENV"
+          echo "PLE_RUN=$fixture/run" >> "$GITHUB_ENV"
+          echo "$fixture/bin" >> "$GITHUB_PATH"
+          cat > "$fixture/bin/uv" <<'BASH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          test -z "${ACTIONS_RUNTIME_TOKEN:-}"
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from zipfile import ZipFile
+          root=Path(os.environ['PLE_OPERATOR'])
+          (root/'live-progress.log').write_text('synthetic first delivery\n')
+          with ZipFile(root/'candidate.zip','w') as archive:
+              archive.writestr('fixture.txt','synthetic delivery')
+          (root/'candidate.zip').replace(root/'first-delivery.zip')
+          PY
+          sleep 10
+          echo 'Synthetic evaluation finished'
+          BASH
+          chmod +x "$fixture/bin/uv"
+      - name: Exercise the live upload action with a synthetic ZIP
+        uses: ./.github/actions/ple-evaluate
+      - uses: actions/download-artifact@v4
+        with:
+          name: ple-fbs-first-delivery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ple-checkpoint-download
+      - name: Verify the uploaded bytes and progress log
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from zipfile import ZipFile
+          root=Path(os.environ['RUNNER_TEMP'])/'ple-checkpoint-download'
+          with ZipFile(root/'first-delivery.zip') as archive:
+              assert archive.read('fixture.txt')==b'synthetic delivery'
+          assert (root/'checkpoint-progress.log').read_text()=='synthetic first delivery\n'
+          PY
+      - name: Build Linux portability image
+        run: docker build -f ple_entry/Dockerfile.test -t fbs-ple-smoke .
+      - name: Start with read-only root and limited resources
+        run: docker run -d --name fbs-ple-smoke --read-only --tmpfs /tmp:rw,size=1g --cpus 2 --memory 4g -e PORT=8765 -p 127.0.0.1:8765:8765 fbs-ple-smoke
+      - run: python tests/check_container_startup.py
+      - name: Cleanup portability container
+        if: always()
+        run: docker rm -f fbs-ple-smoke || true

@@ -47,6 +47,7 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "candidate_validated",
         "candidate_rejected",
         "candidate_selected",
+        "contract_repair_stalled",
         "graph_rewrite_applied",
         "task_claimed",
         "api_request_started",
