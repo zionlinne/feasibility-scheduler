@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import replace
 import hashlib
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -148,6 +149,28 @@ class ModelStreamInterrupted(ValueError):
     """A model stream failed after the first response chunk."""
 
 
+async def run_calculation_probe(session, probe):
+    """Run the worker's small fixture in the task container and compare the measured scalar here."""
+    try:
+        if not isinstance(probe, dict) or type(probe.get('expected')) not in (int, float):
+            raise ValueError('Missing numeric expectation')
+        expected = probe['expected']
+        script = probe.get('python')
+        if not math.isfinite(expected) or not isinstance(script, str) or not script.strip():
+            raise ValueError('Missing finite expectation or executable fixture')
+        result = await session.exec('python3 -c ' + shlex.quote(script), timeout_sec=30)
+        if result.get('exit_code') != 0 or result.get('timed_out') or result.get('truncated'):
+            return {'status': 'unverified', 'expected': expected, 'reason': 'Fixture did not finish cleanly'}
+        observed = json.loads(result['output'])
+        if type(observed) not in (int, float) or not math.isfinite(observed):
+            raise ValueError('Fixture did not produce one finite number')
+        matches = math.isclose(expected, observed, rel_tol=1e-9, abs_tol=1e-12)
+        return {'status': 'matched' if matches else 'mismatch', 'expected': expected, 'observed': observed}
+    except Exception as exc:
+        # An optional numerical check must never prevent an otherwise valid delivery.
+        return {'status': 'unverified', 'reason': type(exc).__name__}
+
+
 class ModelWorker:
     def __init__(self,session,delivery=None,*,direct_delivery=False):
         from openai import AsyncOpenAI
@@ -187,7 +210,7 @@ class ModelWorker:
             raise error('Model stream ended before the completion finished')
         return response
 
-    async def run(self,prompt,*,planning=False,review=False,importing=False,protocol_feedback=False,owned=(),continuing=False,lite_planning=False,inspect_scope=False):
+    async def run(self,prompt,*,planning=False,review=False,importing=False,protocol_feedback=False,owned=(),continuing=False,lite_planning=False,inspect_scope=False,calculation_check=None):
         rules=(('You import task I/O for the PR5 adapter. ' if importing else
                 'You execute a request dispatched by the existing PR5 FBS harness. ')+
           'Follow its current contract, ownership, checks and output JSON schema. '
@@ -276,6 +299,16 @@ class ModelWorker:
                         'assigned outputs and working files first. Continue unfinished work or the '
                         'specific failed checks in this request. Preserve completed calculations, '
                         'formulas and citations outside that repair. ')
+        if calculation_check:
+            rules += ('\nFor this unit only, check this source-defined calculation: '
+                      + json.dumps(calculation_check, ensure_ascii=False)
+                      + '. Confirm the source. Choose a small discriminating input with an independently '
+                        'derived numerical expectation. In your final JSON add calculation_probe with '
+                        'expected (a number) and python (a short read-only Python fixture that calls or '
+                        'instruments the same implementation used to generate the deliverable, printing '
+                        'only the measured JSON number in the same units). Pick a case where only numerical '
+                        'roundoff is expected. Do not reimplement the measured path, read a report summary, '
+                        'or print an assumed value. If this cannot be reproduced, omit the probe and deliver. ')
         can_record_item = False
         if self.delivery is not None:
             rules+='\nHOST TASK DELIVERY MAP (read-only): '+json.dumps(self.delivery.spec)+'\n'
@@ -341,12 +374,19 @@ class ModelWorker:
         last_guide_comparison = None
         request_retries = 0
         correcting_reply = False
+        original_tools = tools
+        retry_probe = None
+        first_delivery = None
         phase_started=monotonic()
         phase = 'root' if review else 'import' if importing else 'plan' if planning else 'worker'
         stream_retry_limit = {'root': 5, 'worker': 1}.get(phase, 0)
         while True:
             left=self.session.time_left()
-            if left is not None and left<=0: raise TimeoutError('Official task time exhausted')
+            if left is not None and left<=0:
+                if first_delivery is not None:
+                    event('pr5_lite_correction_unavailable', reason='time_exhausted')
+                    return first_delivery
+                raise TimeoutError('Official task time exhausted')
             kwargs={'model':self.model,'messages':messages,'reasoning_effort':'high',
                     'max_completion_tokens':64000}
             if planning:
@@ -369,6 +409,9 @@ class ModelWorker:
                     if phase == 'worker':
                         event('pr5_worker_request_retry', error_type=type(exc).__name__)
                     continue
+                if first_delivery is not None:
+                    event('pr5_lite_correction_unavailable', reason=type(exc).__name__)
+                    return first_delivery
                 raise
             request_retries = 0
             u=response.usage
@@ -385,6 +428,9 @@ class ModelWorker:
                     result=parse_object(message.content or '')
                 except (ValueError, IndexError):
                     if phase != 'worker' or correcting_reply:
+                        if first_delivery is not None:
+                            event('pr5_lite_correction_unavailable', reason='invalid_reply')
+                            return first_delivery
                         raise
                     correcting_reply = True
                     tools = []
@@ -395,11 +441,31 @@ class ModelWorker:
                     continue
                 if review and operations==0:
                     raise ValueError('Root did not inspect the actual task environment')
+                if calculation_check:
+                    supplied_probe = result.pop('calculation_probe', None)
+                    probe = retry_probe if retry_probe is not None else supplied_probe
+                    evidence = await run_calculation_probe(self.session, probe)
+                    event('pr5_lite_calculation_check', **calculation_check, **evidence,
+                          attempt=2 if retry_probe is not None else 1)
+                    if evidence['status'] == 'mismatch' and retry_probe is None:
+                        retry_probe = probe
+                        first_delivery = result
+                        tools = original_tools
+                        correcting_reply = False
+                        messages.append({'role':'user','content':
+                            'The calculation fixture returned ' + json.dumps(evidence)
+                            + '. Correct the calculation and regenerate affected owned outputs once, '
+                              'then return your delivery. The host will replay the original fixture. '
+                              'If unresolved, deliver the best available work now.'})
+                        continue
                 event('pr5_model_phase_finished', phase=phase, seconds=round(monotonic()-phase_started, 1),
                       calls=calls, tools=operations)
                 return result
             for call in message.tool_calls:
                 fn=call.function;operations+=1
+                if fn.name in ('bash', 'write_file', 'record_item_zip', 'task_mcp_call'):
+                    # A receipt from before an edit may describe different files on disk.
+                    first_delivery = None
                 try:
                     args=json.loads(fn.arguments)
                     if fn.name=='bash': result=await self.session.exec(args['command'],timeout_sec=args['timeout_sec'])
@@ -490,9 +556,10 @@ async def solve(session):
             event('pr5_guide_sources_unavailable')
     worker.delivery=delivery
     lite_plan=None
+    calculation_check=None
     if lite:
         event('pr5_lite_planning_started',deliverables=len(delivery.names))
-        lite_plan=await plan_delivery(worker,task_source,delivery)
+        lite_plan,calculation_check=await plan_delivery(worker,task_source,delivery)
         spec=delivery.spec
         event('pr5_lite_planning_finished',modules=len(lite_plan['modules']))
     names=delivery.names
@@ -612,7 +679,10 @@ async def solve(session):
                 continuing = bool(repair) or task_id in failed_work
                 if task_id in failed_work:
                     event('pr5_worker_resuming')
-                body=await worker.run(request['prompt'],planning=planning,owned=owned,continuing=continuing)
+                unit_options = {}
+                if not planning and calculation_check and calculation_check['file'] in owned:
+                    unit_options['calculation_check'] = calculation_check
+                body=await worker.run(request['prompt'],planning=planning,owned=owned,continuing=continuing,**unit_options)
                 original=json.dumps(body,sort_keys=True)
                 body=canonicalize_paths(body,aliases,planning=planning)
                 if planning:

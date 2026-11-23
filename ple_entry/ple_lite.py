@@ -55,7 +55,12 @@ async def plan_delivery(worker, source, delivery):
         'deliverable is an actual input. One unit is valid when ownership cannot be separated. '
         'Optionally give tightly related small units the same nonempty cohesion_group to let '
         'FBS merge them before dispatch. List genuine missing inputs in unresolved. '
-        'The host builds the delivery checks.\n'
+        'The host builds the delivery checks. If the supplied task explicitly specifies a numeric '
+        'relationship whose result feeds subsequent calculations, you may select ONE such relationship '
+        'for a small independently calculable example. Add a top-level calculation_check with '
+        '{"file":"one owned deliverable ID of the calculating unit","source":"source location and exact '
+        'requirement","quantity":"value to inspect in the actual downstream calculation and its units"}. '
+        'Use only requirements supported by the materials you have read. Otherwise omit it.\n'
     )
     if can_expand:
         prompt += (
@@ -71,6 +76,7 @@ async def plan_delivery(worker, source, delivery):
     prompt += ('TASK ROOT\n' + delivery.spec['root'] + '\nDELIVERABLE IDS\n'
                + json.dumps(delivery.names) + '\nORIGINAL TASK\n' + source)
     proposal = await worker.run(prompt, planning=True, lite_planning=True, inspect_scope=can_expand)
+    aliases = {}
     if 'archive_members' in proposal:
         members = proposal['archive_members']
         if not can_expand or not isinstance(members, list) or len(members) < 2:
@@ -85,7 +91,17 @@ async def plan_delivery(worker, source, delivery):
                 raise ValueError('Lite units must use the declared archive member names')
         proposal = {**proposal, 'units': [{**unit, 'files': [aliases[name] for name in unit['files']]}
                                           for unit in units]}
-    return compile_plan(proposal, source, delivery.names)
+    plan = compile_plan(proposal, source, delivery.names)
+    # Route by artifact ownership so a split, merge or single-unit plan keeps the check local.
+    check = proposal.get('calculation_check')
+    if isinstance(check, dict) and all(isinstance(check.get(k), str) and check[k].strip()
+                                       for k in ('file', 'source', 'quantity')):
+        owner_file = aliases.get(check['file'], check['file'])
+        if owner_file in delivery.names:
+            return plan, {'file': owner_file, 'source': check['source'], 'quantity': check['quantity']}
+    if check is not None:
+        delivery.event('pr5_lite_calculation_unassigned', reason='Missing source, quantity or owned deliverable')
+    return plan, None
 
 
 def compile_plan(proposal, source, artifacts):

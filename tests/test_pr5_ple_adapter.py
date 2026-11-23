@@ -656,11 +656,14 @@ def test_direct_ple_delivery_checks_formal_zip_without_root_or_repair(tmp_path, 
     assert not any(kind == 'pr5_root_review_started' or f.get('repair_round') for kind, f in events)
 
 
-def test_lite_splits_and_merges_scoped_guide_members_before_direct_delivery(tmp_path, monkeypatch):
+@pytest.mark.parametrize('with_check', [False, True])
+def test_lite_splits_and_merges_scoped_guide_members_before_direct_delivery(tmp_path, monkeypatch, with_check):
     archive = tmp_path/'output'/'submission.zip'
     brief = (f'Write your deliverable to `{archive}`.\n'
              '`specs/`: **one `.docx` per section**. Edit the guide specification for each section.\n'
              'Include `design_basis.xlsx`.')
+    if with_check:
+        brief += ' Size the power section using the average of the two equally weighted inputs.'
     numbers = ('26 00 01', '26 00 02', '26 00 03')
     original = ' '.join(f'masterword{i}' for i in range(200))
     for number in (*numbers, '26 00 04'):
@@ -696,9 +699,19 @@ def test_lite_splits_and_merges_scoped_guide_members_before_direct_delivery(tmp_
                          for mid, name, group in zip(ids, members, ('distribution', 'distribution', 'lighting'))]
                 units.append({'id': 'basis', 'work': 'Reconcile the workbook with completed sections.',
                               'files': [members[-1]], 'depends_on': list(ids), 'estimated_tokens': 8000})
-                return {'units': units, 'unresolved': [],
+                plan = {'units': units, 'unresolved': [],
                         'archive_members': [{'name': name, 'kind': 'binary'} for name in members]}
+                if with_check:
+                    plan['calculation_check'] = {'file': members[0], 'source': brief.split('. ')[-1],
+                                                 'quantity': 'mean input used for sizing'}
+                return plan
             calls.append(tuple(owned))
+            target = next(item['artifact'] for item in self.delivery.spec['files']
+                          if item['path'].endswith(f'{numbers[0]}.docx'))
+            if with_check and target in owned:
+                assert len(owned) == 2 and kwargs['calculation_check']['file'] == target
+            else:
+                assert 'calculation_check' not in kwargs
             files = {}
             for item in self.delivery.spec['files']:
                 if item['artifact'] not in owned:

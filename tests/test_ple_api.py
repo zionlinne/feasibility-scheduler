@@ -4,6 +4,8 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import shlex
+import subprocess
 import sys
 from time import monotonic
 from types import SimpleNamespace
@@ -16,6 +18,67 @@ import pytest
 PATH=Path(__file__).resolve().parents[1]/'cloud/check_api.py'
 spec=importlib.util.spec_from_file_location('api_probe_fixture',PATH)
 api=importlib.util.module_from_spec(spec);spec.loader.exec_module(api)
+
+
+@pytest.mark.parametrize('case, statuses', [
+    ('correct', ['matched']), ('missing', ['unverified']), ('broken', ['unverified']),
+    ('fix', ['mismatch', 'matched']), ('still_wrong', ['mismatch', 'mismatch']),
+])
+def test_lite_probes_actual_calculation_before_handoff(tmp_path, monkeypatch, case, statuses):
+    monkeypatch.syspath_prepend(str(PATH.parents[1] / 'ple_entry'))
+    monkeypatch.setenv('OPENAI_API_KEY', 'fixture')
+    monkeypatch.setenv('MODEL_NAME', 'fixture-model')
+    import pr5_adapter as adapter
+
+    events, replies = [], []
+    monkeypatch.setattr(adapter, 'event', lambda name, **fields: events.append((name, fields)))
+    solver = tmp_path / 'solver.py'
+    correct = 'def downstream(a, b): return (a + b) / 2'
+    solver.write_text(correct if case == 'correct' else 'def downstream(a, b): return a')
+    script = 'from solver import downstream; print(downstream(100, 300))'
+    probe = {'expected': 200, 'python': 'raise ValueError()' if case == 'broken' else script}
+
+    async def execute(command, timeout_sec):
+        program, flag, code = shlex.split(command)
+        assert (program, flag) == ('python3', '-c')
+        proc = subprocess.run([sys.executable, '-B', flag, code], cwd=tmp_path,
+                              capture_output=True, text=True, timeout=timeout_sec)
+        return {'exit_code': proc.returncode, 'output': proc.stdout + proc.stderr}
+
+    async def run():
+        worker = adapter.ModelWorker(SimpleNamespace(time_left=lambda: 60, exec=execute))
+
+        async def complete(phase, started, **kwargs):
+            assert phase == 'worker' and len(replies) < 2
+            body = {'files': {'answer.txt': 'current answer'}}
+            if not replies and case != 'missing':
+                body['calculation_probe'] = probe
+            elif replies:
+                assert 'Correct the calculation' in kwargs['messages'][-1]['content']
+                # A replacement expectation must never mask an unresolved mismatch.
+                body['calculation_probe'] = {'python': 'print(100)', 'expected': 100}
+                if case == 'fix':
+                    solver.write_text(correct)
+            replies.append(body)
+            content = json.dumps(body)
+            msg = SimpleNamespace(tool_calls=None, content=content,
+                                  model_dump=lambda **kw: {'role': 'assistant', 'content': content})
+            return SimpleNamespace(usage=None, choices=[SimpleNamespace(message=msg)])
+
+        worker.complete = complete
+        try:
+            return await worker.run('Deliver the result.', owned=['answer.txt'], calculation_check={
+                'file': 'answer.txt', 'source': 'fixture: mean of two inputs', 'quantity': 'downstream input'})
+        finally:
+            await worker.client.close()
+
+    assert asyncio.run(run()) == {'files': {'answer.txt': 'current answer'}}
+    checks = [row for kind, row in events if kind == 'pr5_lite_calculation_check']
+    assert [row['status'] for row in checks] == statuses
+    assert len(replies) == len(checks)
+    if len(checks) == 2:
+        assert [row['attempt'] for row in checks] == [1, 2]
+        assert all(row['expected'] == 200 for row in checks)
 
 
 def submission():
