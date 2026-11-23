@@ -656,6 +656,96 @@ def test_direct_ple_delivery_checks_formal_zip_without_root_or_repair(tmp_path, 
     assert not any(kind == 'pr5_root_review_started' or f.get('repair_round') for kind, f in events)
 
 
+@pytest.mark.parametrize('with_check', [False, True])
+def test_lite_splits_and_merges_scoped_guide_members_before_direct_delivery(tmp_path, monkeypatch, with_check):
+    archive = tmp_path/'output'/'submission.zip'
+    brief = (f'Write your deliverable to `{archive}`.\n'
+             '`specs/`: **one `.docx` per section**. Edit the guide specification for each section.\n'
+             'Include `design_basis.xlsx`.')
+    if with_check:
+        brief += ' Size the power section using the average of the two equally weighted inputs.'
+    numbers = ('26 00 01', '26 00 02', '26 00 03')
+    original = ' '.join(f'masterword{i}' for i in range(200))
+    for number in (*numbers, '26 00 04'):
+        (tmp_path/f'{number}.SEC').write_text(f'<SPEC>{original}</SPEC>')
+
+    def docx(path, paragraphs):
+        root = ET.Element(WORD_XML+'document')
+        body = ET.SubElement(root, WORD_XML+'body')
+        for text in paragraphs:
+            para = ET.SubElement(body, WORD_XML+'p')
+            ET.SubElement(ET.SubElement(para, WORD_XML+'r'), WORD_XML+'t').text = text
+        with zipfile.ZipFile(path, 'w') as doc:
+            doc.writestr('word/document.xml', ET.tostring(root))
+
+    docx(tmp_path/'SOW.docx', ['Deliver, and only deliver, the following sections: '
+                             + '; '.join(numbers) + '. Section 26 00 04 is under another task order.'])
+    events, calls = [], []
+
+    class Worker:
+        def __init__(self, session, *, direct_delivery):
+            assert direct_delivery
+
+        async def run(self, prompt, *, planning=False, lite_planning=False, owned=(), **kwargs):
+            assert not kwargs.get('review') and not kwargs.get('continuing')
+            if planning:
+                assert lite_planning and kwargs['inspect_scope']
+                assert self.delivery.names == ['receipts/submission.zip.json']
+                calls.append('plan')
+                ids = ('power', 'switches', 'light')
+                members = [f'specs/{number}.docx' for number in numbers] + ['design_basis.xlsx']
+                units = [{'id': mid, 'work': f'Tailor the {mid} section.', 'files': [name],
+                          'depends_on': [], 'estimated_tokens': 1000, 'cohesion_group': group}
+                         for mid, name, group in zip(ids, members, ('distribution', 'distribution', 'lighting'))]
+                units.append({'id': 'basis', 'work': 'Reconcile the workbook with completed sections.',
+                              'files': [members[-1]], 'depends_on': list(ids), 'estimated_tokens': 8000})
+                plan = {'units': units, 'unresolved': [],
+                        'archive_members': [{'name': name, 'kind': 'binary'} for name in members]}
+                if with_check:
+                    plan['calculation_check'] = {'file': members[0], 'source': brief.split('. ')[-1],
+                                                 'quantity': 'mean input used for sizing'}
+                return plan
+            calls.append(tuple(owned))
+            target = next(item['artifact'] for item in self.delivery.spec['files']
+                          if item['path'].endswith(f'{numbers[0]}.docx'))
+            if with_check and target in owned:
+                assert len(owned) == 2 and kwargs['calculation_check']['file'] == target
+            else:
+                assert 'calculation_check' not in kwargs
+            files = {}
+            for item in self.delivery.spec['files']:
+                if item['artifact'] not in owned:
+                    continue
+                path = Path(item['path'])
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if path.suffix == '.docx':
+                    docx(path, ['SECTION '+path.stem, original])
+                else:
+                    assert len(calls) == 4
+                    with zipfile.ZipFile(path, 'w') as workbook:
+                        workbook.writestr('xl/workbook.xml', '<workbook/>')
+                files[item['artifact']] = json.dumps({'path': str(path)})
+            return {'ok': True, 'files': files}
+
+    monkeypatch.setenv('FBS_PLE_LITE', '1')
+    monkeypatch.delenv('FBS_PLE_SAVE_FIRST_DELIVERY', raising=False)
+    monkeypatch.setattr(adapter, 'ModelWorker', Worker)
+    monkeypatch.setattr(adapter, 'event', lambda name, **fields: events.append((name, fields)))
+    session = LocalTaskSession()
+    session.instruction, session.workdir = brief, str(tmp_path)
+    result = asyncio.run(adapter.solve(session))
+    assert 'FBS delivery checks passed=True' in result
+    assert sorted(len(files) for files in calls[1:-1]) == [1, 2]
+    assert len(calls) == 4 and all('xlsx' in name for name in calls[-1])
+    rewrites = [(i, f['rewrite_kind']) for i, (name, f) in enumerate(events)
+                if name == 'pr5_scheduler_event' and f.get('rewrite_kind')]
+    assert [kind for _, kind in rewrites] == ['split', 'merge']
+    assert rewrites[-1][0] < next(i for i, (name, _) in enumerate(events) if name == 'pr5_native_dispatch')
+    assert not any(name == 'pr5_root_review_started' or f.get('repair_round') for name, f in events)
+    with zipfile.ZipFile(archive) as package:
+        assert sorted(package.namelist()) == ['design_basis.xlsx', *(f'specs/{number}.docx' for number in numbers)]
+
+
 def test_root_review_repairs_declared_outputs_with_pr5(tmp_path, monkeypatch):
     from dataclasses import replace
     from feasibility_scheduler.adapters.legacy_doc import run_legacy_doc

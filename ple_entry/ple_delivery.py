@@ -589,7 +589,8 @@ class Delivery:
     def final_message(self, workspace, accepted, *, direct_delivery=False):
         messages = [workspace/f['artifact'] for f in self.spec['files'] if f['kind'] == 'final_message']
         text = '\n'.join(p.read_text(encoding='utf8') for p in messages if p.is_file())
-        paths = [f['path'] for f in self.spec['files'] if f['kind'] != 'final_message'] + [a['path'] for a in self.spec['archives']]
+        paths = [f['path'] for f in self.spec['files'] if f['kind'] != 'final_message' and not f.get('staged_member')]
+        paths += [a['path'] for a in self.spec['archives']]
         verdict = f'PR5 host acceptance={accepted}'
         if direct_delivery:
             verdict = f'FBS delivery checks passed={accepted}. Engineering evaluation: official grader'

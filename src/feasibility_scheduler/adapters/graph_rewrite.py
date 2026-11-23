@@ -205,6 +205,7 @@ def _merge_pair(
     right: Task,
     *,
     serial: int,
+    allow_document_merge: bool = False,
 ) -> RewriteCandidate | None:
     """合并两个未领取、文件不交叠的真实模块。"""
     owned_l = _owned(left)
@@ -223,7 +224,7 @@ def _merge_pair(
     if set_l & set_r:
         return None  # 假/冲突边界
     # 禁止把说明文件单独当成「合并收益」核心；至少一侧要有源码文件
-    if not any(_is_code_file(p) for p in list(owned_l) + list(owned_r)):
+    if not allow_document_merge and not any(_is_code_file(p) for p in list(owned_l) + list(owned_r)):
         return None
 
     merged_id = f"merge_{left.id}_{right.id}"
@@ -458,6 +459,7 @@ def generate_candidates(
     tasks: Sequence[Task],
     *,
     states: Mapping[str, str],
+    allow_document_merge: bool = False,
 ) -> list[RewriteCandidate]:
     """生成 keep + 合法 split/merge 候选（未领取任务）。"""
     task_list = list(tasks)
@@ -500,7 +502,7 @@ def generate_candidates(
             if left.id in right.dependencies or right.id in left.dependencies:
                 continue
             serial += 1
-            cand = _merge_pair(task_list, left, right, serial=serial)
+            cand = _merge_pair(task_list, left, right, serial=serial, allow_document_merge=allow_document_merge)
             if cand is not None:
                 candidates.append(cand)
 
@@ -532,9 +534,10 @@ def decide_rewrite(
     tasks: Sequence[Task],
     *,
     states: Mapping[str, str],
+    allow_document_merge: bool = False,
 ) -> tuple[RewriteCandidate, list[RewriteCandidate]]:
     """生成并选出最佳候选；返回 (selected, all)。"""
-    all_cands = generate_candidates(tasks, states=states)
+    all_cands = generate_candidates(tasks, states=states, allow_document_merge=allow_document_merge)
     # 给每个非 keep 候选再跑一遍「假拆合」门：added 必须带来真实 owned 变化
     filtered: list[RewriteCandidate] = []
     for cand in all_cands:
